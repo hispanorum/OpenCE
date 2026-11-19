@@ -944,6 +944,7 @@ enum
 	_halo_pc_function_change_settings = 137,
 	_halo_pc_function_map_row = 160,
 	_halo_pc_function_restart = 163,
+	_halo_pc_function_choose_team = 157,
 	_halo_pc_function_map_ok = 164
 };
 
@@ -3556,6 +3557,12 @@ boolean ui_widget_event_handler_function_invoke(
 		a profile is being edited ("close if not editing profile"), so
 		player 1's is begun first; with none, the screen is not opened */
 		return pc_menu_profile_edit_begin();
+	}
+	if (function_index == _halo_pc_function_choose_team)
+	{
+		extern boolean pc_menu_team_choose(struct widget_instance *widget, struct event_record *event);
+
+		return pc_menu_team_choose(widget, event);
 	}
 		if (function_index == 113)
 	{

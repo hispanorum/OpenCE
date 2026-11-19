@@ -154,6 +154,8 @@ boolean pc_menu_event_function_invoke(struct widget_instance *widget, struct eve
 	long function_index, boolean *widget_deleted);
 void pc_menu_game_data_function_invoke(struct widget_instance *widget, long function);
 
+boolean pc_menu_team_set(struct widget_instance *widget, struct event_record *event, char team);
+
 /* ---------- constants */
 
 #define MAXIMUM_STRINGS 64
@@ -11095,6 +11097,14 @@ boolean pc_menu_event_function_invoke(
 		{
 			return coop_friendly_fire_change();
 		}
+		else if (!strcmp(name, "port team red"))
+		{
+			return pc_menu_team_set(widget, event, 0);
+		}
+		else if (!strcmp(name, "port team blue"))
+		{
+			return pc_menu_team_set(widget, event, 1);
+		}
 		else if (!strcmp(name, "player profile save changes"))
 		{
 			return profile_save_changes(widget, widget_deleted);
@@ -11675,4 +11685,46 @@ boolean pc_menu_activate_screen(
 	if (deleted)
 		*widget_deleted = TRUE;
 	return found;
+}
+
+boolean network_game_client_update_local_player_data(void *client, struct network_player *player);
+struct network_game *network_game_get_game(void);
+
+/* port: red 0, blue 1, for the pressing controller's player: in the lobby,
+and in a game (the host applies it: mcc_ui_team_request) */
+boolean pc_menu_team_set(struct widget_instance *widget, struct event_record *event, char team)
+{
+	struct network_game *game = network_game_get_game();
+	short machine_index = network_game_client_get_local_machine_index();
+	short controller = event_controller(widget, event);
+	long index;
+
+	if (!game || machine_index == NONE || !game->variant.universal_variant.teams ||
+		game->variant_options.auto_team_balance)
+	{
+		return campaign_fail();
+	}
+	for (index = 0; index < (long)NUMBEROF(game->players); index++)
+	{
+		if (network_player_is_valid(&game->players[index]) &&
+			(short)game->players[index].machine_index == machine_index &&
+			(short)game->players[index].controller_index == controller)
+		{
+			struct network_player player = game->players[index];
+
+			player.team_index = team;
+			return network_game_client_update_local_player_data(global_network_game_client_get(), &player)
+				|| campaign_fail();
+		}
+	}
+	return campaign_fail();
+}
+
+/* port: a Custom Edition map's choose team screen (Halo PC's function 157):
+its buttons in the order its screen lists them, blue first, red second */
+boolean pc_menu_team_choose(struct widget_instance *widget, struct event_record *event)
+{
+	short place = sibling_index(widget);
+
+	return pc_menu_team_set(widget, event, place == 0 ? 1 : 0);
 }
