@@ -3467,11 +3467,41 @@ static boolean ui_widget_function_denied(
 	return denied;
 }
 
-/* port: ui_widget_function_denied, for ui_widget.c (a widget whose handlers
-only run denied functions is shown disabled) */
 boolean ui_widget_port_function_denied(struct widget_instance *widget, word function_index)
 {
+	/* port: the OK of a map's profile settings screen is never greyed (ui_widget_event_handler_function_invoke
+	does it) */
+	if (function_index == 67 && !main_menu_is_active())
+		return FALSE;
 	return ui_widget_function_denied(widget, function_index);
+}
+
+/* port: the sound a settings screen's OK, Defaults and back functions make when their handler has none of its
+own (a go back or open has one): Halo PC's 109 (back), 122, 124, 125, 127, 131, 167 (OK) and 133 to 136, 187
+(Defaults), and the menus' Defaults functions. 3 is the back sound, 0 none. */
+short ui_widget_event_handler_function_sound(
+	word function_index)
+{
+	extern char const *pc_menu_function_name(long function_index);
+	static short const sounding_functions[] = { 109, 122, 124, 125, 127, 131, 133, 134, 135, 136, 167, 187 };
+	short index;
+
+	for (index = 0; index < (short)NUMBEROF(sounding_functions); index++)
+	{
+		if (function_index == (word)sounding_functions[index])
+			return 3;
+	}
+	if (function_index >= PC_MENU_FUNCTION_BASE && function_index < 0x8000)
+	{
+		char const *name = pc_menu_function_name(function_index - PC_MENU_FUNCTION_BASE);
+
+		if (name && (!strcmp(name, "port settings defaults") || !strcmp(name, "controls screen defaults") ||
+			!strcmp(name, "port controller defaults")))
+		{
+			return 3;
+		}
+	}
+	return 0;
 }
 
 boolean ui_widget_event_handler_function_invoke(
@@ -3485,10 +3515,19 @@ boolean ui_widget_event_handler_function_invoke(
 	match_vassert("c:\\halo\\SOURCE\\interface\\ui_widget_event_handler_functions.c", 478,
 		widget != NULL && widget_deleted != NULL,
 		"(widget != NULL) && (widget_deleted != NULL)");
-	/* port: a map's own widgets (not the menus' tags the port adds) may not
-	run what changes the player's files or settings: ui_widget_function_denied
-	(failed, as an invalid function is, so the handler opens and closes no
-	screens after it) */
+	/* port: OK of a map's profile settings screen: any change is saved and the editing goes on (the screen
+	it goes back to needs a profile being edited, "close if not editing profile"); the handler goes back */
+	if (function_index == 67 && !main_menu_is_active())
+	{
+		if (player_ui_get_edit_player_profile() && player_ui_edit_profile_is_dirty())
+		{
+			long edit_index = player_ui_get_edit_profile_index();
+
+			if (player_ui_save_profile())
+				player_ui_begin_editing_profile(edit_index);
+		}
+		return TRUE;
+	}
 	if (ui_widget_function_denied(widget, function_index))
 		return function_index == 65; /* port: end editing: nothing to do for a map's widget, but it must not fail, or its go back is skipped */
 	/* port: MCC's additional in-map functions have their own dispatcher (mcc_ui.c) */

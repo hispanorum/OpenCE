@@ -1382,6 +1382,9 @@ static boolean ui_widget_load_children_recursive(
 /* port: whether the tag is one of the menus' (port/linux/game/menu_tags.c) */
 boolean pc_menu_tag(
 	long tag_index);
+/* port: ui_widget_event_handler_functions.c's */
+short ui_widget_event_handler_function_sound(
+	word function_index);
 /* port: whether this machine has, or is adding, a second player: co-op,
 split screen, the lobby's (port/linux/game/menu_functions.c) */
 unsigned char pc_menu_split_players(
@@ -1652,6 +1655,8 @@ static struct stack_memory_pool_medium __medium_widget_memory_pool =
 struct stack_memory_pool *widget_memory_pool = &__medium_widget_memory_pool.pool;
 
 static boolean main_screen_shell_first_load = TRUE;
+/* port: the row of a map's own list that the pointer rests over: its text is drawn as focused, nothing else changes */
+static struct widget_instance *ui_mouse_hover_row = NULL;
 
 short dashboard_abort_error = NONE;
 
@@ -2424,14 +2429,26 @@ void ui_widget_delete(
 		"c:\\halo\\SOURCE\\interface\\ui_widget.c",
 		469,
 		widget && widget_globals.initialized);
-	if (widget->delete_recursion_lock)
-		return;
 	widget->delete_recursion_lock = TRUE;
 	if (widget->local_player_index != NONE && !widget->parent)
+	{
 		player_control_inhibit_buttons(
 			widget->local_player_index,
 			WIDGET_DELETED_PLAYER_CONTROL_INHIBIT_FLAGS,
 			TRUE);
+	}
+	else if (!widget->parent && !we_are_at_the_main_menu)
+	{
+		/* port: an in-game screen for everyone (a pause menu's New Game screens): B must not reach the
+		game as a melee for any local player */
+		short inhibited_player;
+
+		for (inhibited_player = local_player_get_next(NONE); inhibited_player != NONE;
+			inhibited_player = local_player_get_next(inhibited_player))
+		{
+			player_control_inhibit_buttons(inhibited_player, WIDGET_DELETED_PLAYER_CONTROL_INHIBIT_FLAGS, TRUE);
+		}
+	}
 	definition = ui_widget_definition_get(widget->definition_tag_index);
 	for (handler_index = 0;
 		handler_index < definition->event_handlers.count;
@@ -2503,6 +2520,8 @@ void ui_widget_delete(
 		}
 	}
 	ui_widget_port_row_forget(widget);
+	if (widget == ui_mouse_hover_row)
+		ui_mouse_hover_row = NULL;
 	ui_widget_delete_children_recursive(widget);
 	if (widget->previous)
 		widget->previous->next = widget->next;
@@ -3820,6 +3839,9 @@ static void event_handler_dispatch(
 			}
 		}
 	}
+	/* port: the sound of a settings screen's OK, Defaults and back */
+	if (audio_feedback == _ui_audio_feedback_none && TEST_FLAG(handler->flags, _event_handler_run_function_bit))
+		audio_feedback = ui_widget_event_handler_function_sound(handler->function);
 	ui_play_audio_feedback_sound(audio_feedback);
 	*calling_widget_deleted = widget_deleted;
 
@@ -5556,7 +5578,14 @@ static boolean widget_instance_text_box_is_focused(
 {
 	struct widget_instance *parent = widget->parent;
 	boolean focused = parent ? parent->focused_child == widget : TRUE;
+	struct widget_instance *hovered;
 
+	/* port: the text of the row the pointer rests over (ui_mouse_hover_row) */
+	for (hovered = widget; ui_mouse_hover_row && hovered; hovered = hovered->parent)
+	{
+		if (hovered == ui_mouse_hover_row)
+			return TRUE;
+	}
 	if (!focused && parent)
 	{
 		struct widget_instance *ancestor;
@@ -6269,6 +6298,9 @@ enum ui_mouse_target_kind
 	_ui_mouse_target_list_forward
 };
 
+/* port: menu_functions.c: pages the gametype list; FALSE if it cannot go that way */
+boolean pc_menu_gametype_scroll(short direction);
+
 struct ui_mouse_target
 {
 	struct widget_instance *widget;
@@ -6444,7 +6476,7 @@ static void ui_debug_draw_targets(
 		for (index = 0; index < ui_mouse_target_count; index++)
 		{
 			/* in the order of enum ui_mouse_target_kind; the band's two sides
-			share orange, which no other kind uses */
+			share orange, which no other kind uses; port: the gametype list's scroll buttons magenta */
 			static pixel32 const colors[] = { 0xc000ff00, 0xc04080ff, 0xc0ffff00, 0xc0ff0000, 0xc0ff8000, 0xc0ff8000 };
 			short kind = ui_mouse_targets[index].kind;
 
@@ -6677,6 +6709,20 @@ static void ui_mouse_note_slot_band(
 	return;
 }
 
+/* port: whether a spinner is on one of the settings screens (video_settings_screen, audio_settings_screen,
+graphics_settings_screen and so on) */
+static boolean ui_mouse_settings_spinner(
+	struct widget_instance *widget)
+{
+	struct widget_instance *top = widget;
+	size_t length;
+
+	while (top->parent)
+		top = top->parent;
+	length = top->name ? strlen(top->name) : 0;
+	return length >= 15 && !strcmp(top->name + length - 15, "settings_screen");
+}
+
 /* notes a widget as a tap target of this frame, if it is one: an item,
 a value, a list slot, or a legend button (kept in parts that
 ui_mouse_fit_button_targets settles into the tap area); a list showing
@@ -6792,9 +6838,17 @@ static void ui_mouse_note_target(
 	target->button_index = button_index;
 	target->split_x = (bounds.x0 + bounds.x1) / 2;
 	target->split_y = (bounds.y0 + bounds.y1) / 2;
-	target->icon_bounds = icon_bounds;
-	target->label = target_label;
-	target->label_bounds = target_label_bounds;
+	/* port: the category spinners' arrows are drawn just outside their boxes: their area is 20% wider in all,
+	the split between previous and next staying at the middle */
+	if (kind == _ui_mouse_target_value && widget->name &&
+		(!strcmp(widget->name, "group_spinner") || !strcmp(widget->name, "list_item_0_chooser_spinner") ||
+		ui_mouse_settings_spinner(widget)))
+	{
+		short margin = (short)((bounds.x1 - bounds.x0) / 10);
+
+		target->bounds.x0 -= margin;
+		target->bounds.x1 += margin;
+	}
 
 	return;
 }
@@ -7173,46 +7227,41 @@ static void ui_mouse_step_list_to_slot(
 	return;
 }
 
-/* the widget the wheel steps: the innermost on the focus's way that the
-d-pad steps through; a touch drag skips a list showing one value at a time
-(a setting), moving between the rows, so a drag never changes a value; that
-takes a tap on one of its halves; the desktop wheel keeps the game's own
-d-pad reach and steps a setting's value */
-static struct widget_instance *ui_mouse_wheel_widget(
-	struct widget_instance *root,
-	boolean skip_settings)
+/* port: the category sliders: the chooser rows of the gametype and map lists, and the SHOW and PLAYER rows of
+the controls screens. The wheel steps one when it has the focus, and never moves the focus onto one. */
+static boolean ui_mouse_category_spinner(
+	struct widget_instance *widget)
 {
-	struct widget_instance *result = NULL;
-	struct widget_instance *widget;
-
-	for (widget = root; widget; widget = widget->focused_child)
-	{
-		struct ui_widget_definition *definition = ui_widget_definition_get(widget->definition_tag_index);
-
-		if (skip_settings && widget->type == _ui_widget_type_spinner_list && !ui_mouse_list_shows_several(widget))
-			continue;
-		if (definition->flags & (FLAG(_widget_dpad_updown_tabs_thru_children_bit) |
-			FLAG(_widget_dpad_leftright_tabs_thru_children_bit) |
-			FLAG(_widget_dpad_updown_tabs_thru_list_items_bit) |
-			FLAG(_widget_dpad_leftright_tabs_thru_list_items_bit)))
-		{
-			result = widget;
-		}
-	}
-
-	return result;
+	return widget && widget->type == _ui_widget_type_spinner_list && widget->name &&
+		(!strcmp(widget->name, "group_spinner") || !strcmp(widget->name, "list_item_0_chooser_spinner") ||
+		!strcmp(widget->name, "list_item_0_map_kind_spinner") || !strcmp(widget->name, "pad_group") ||
+		!strcmp(widget->name, "pad_player"));
 }
 
-/* whether the focus passes over a child of a list, which gives a press no
-place to land; the PC version's lists skip their labels and hidden rows
-(widget_instance_port_is_label) at both ends and wrap past them, so
-counting one would let a drag step past the last usable row */
+/* port: what the wheel never moves the focus onto: a bar of buttons (a column list among a list's rows) or a
+row with a category slider in it */
+static boolean ui_mouse_wheel_stops_at(
+	struct widget_instance *child)
+{
+	struct widget_instance *part;
+
+	if (child->type == _ui_widget_type_column_list)
+		return TRUE;
+	for (part = child->child; part; part = part->next)
+	{
+		if (ui_mouse_category_spinner(part))
+			return TRUE;
+	}
+	return FALSE;
+}
+
 static boolean ui_mouse_wheel_skips_child(
 	struct widget_instance *list,
 	struct widget_instance *child)
 {
-	return list->type == _ui_widget_type_column_list && pc_menu_tag(list->definition_tag_index) &&
-		widget_instance_port_is_label(child);
+	return !child->visible ||
+		(list->type == _ui_widget_type_column_list && pc_menu_tag(list->definition_tag_index) &&
+		widget_instance_port_is_label(child));
 }
 
 /* how many presses of a d-pad button can step the focus before it would
@@ -7251,6 +7300,8 @@ static long ui_mouse_wheel_room(
 			{
 				struct ui_widget_definition *child_definition = ui_widget_definition_get(child->definition_tag_index);
 
+				if (ui_mouse_wheel_stops_at(child))
+					break;
 				if ((child_definition->event_handlers.count > 0 ||
 					TEST_FLAG(child_definition->flags, _widget_pass_unhandled_events_to_children_bit) ||
 					list) &&
@@ -7285,6 +7336,8 @@ static long ui_mouse_wheel_room(
 					child;
 					child = forward ? child->next : child->previous)
 				{
+					if (ui_mouse_wheel_stops_at(child))
+						break;
 					if (!child->disabled && !ui_mouse_wheel_skips_child(widget, child))
 						room++;
 				}
@@ -7330,12 +7383,20 @@ static boolean ui_mouse_menus_active(
 	return virtual_keyboard_active() || ui_mouse_menu() != NULL || game_engine_showing_postgame();
 }
 
+/* port: menu_functions.c: whether a row is the gametype list's scroll row now */
+boolean pc_menu_gametype_scroll_row(struct widget_instance *row);
+/* port: menu_functions.c: a click on one of the gametype list's scroll rows pages the list */
+void pc_menu_gametype_scroll_click(struct widget_instance *row);
+
 /* port: a row of a list to choose from (the PC version's menus' lists of
 gametypes, maps, profiles, levels and games, and the port's of mods:
 port/assets/menus) */
 static boolean ui_mouse_selection_row(
 	struct widget_instance *widget)
 {
+	/* port: a scroll row is used by one click, not chosen first */
+	if (pc_menu_gametype_scroll_row(widget))
+		return FALSE;
 	if (widget && widget->parent && !strcmp(widget->parent->name, "select_screen_list_template") &&
 		(!strcmp(widget->name, "list_item_0") || !strcmp(widget->name, "list_item_10")))
 		return FALSE;
@@ -7344,6 +7405,35 @@ static boolean ui_mouse_selection_row(
 		!strcmp(widget->parent->name, "select_screen_list_template") ||
 		!strcmp(widget->parent->name, "gametype_select_list")) &&		(!strncmp(widget->name, "list_item_", 10) || !strncmp(widget->name, "server_item_", 12) ||
 			!strncmp(widget->name, "op_mod_", 7));
+}
+
+/* port: a row of the map list or colour screen of a map's own, which is shown hovered but not focused (the
+first and last rows are the scroll buttons, which take the focus). Add "gametype_select_list" here for its rows. */
+static boolean ui_mouse_hover_only_row(
+	struct widget_instance *widget)
+{
+	struct widget_instance *parent = widget ? widget->parent : NULL;
+
+	if (!parent || !parent->name || !widget->name || strncmp(widget->name, "list_item_", 10))
+		return FALSE;
+	/* port: the gametype list's rows: row 0 is its category chooser, the rest are gametypes */
+	if (!strcmp(parent->name, "gametype_select_list"))
+		return strcmp(widget->name, "list_item_0") != 0;
+	if (strcmp(parent->name, "select_screen_list_template") && strcmp(parent->name, "color_select_list"))
+		return FALSE;
+	return strcmp(widget->name, "list_item_0") && strcmp(widget->name, "list_item_10");
+}
+/* port: the scroll rows of those lists: hovering them changes nothing (a click still presses them) */
+static boolean ui_mouse_scroll_row(
+	struct widget_instance *widget)
+{
+	struct widget_instance *parent = widget ? widget->parent : NULL;
+
+	/* port: the gametype list's scroll rows: hovering them changes nothing */
+	if (pc_menu_gametype_scroll_row(widget))
+		return TRUE;
+	if (!parent || !parent->name || !widget->name)
+		return FALSE;
 }
 
 /* logs a tap the menus resolved: where it was and the target the click acts
@@ -7449,6 +7539,7 @@ static void ui_widgets_process_mouse(
 	short controller_index = 0;
 	boolean pointer_active;
 	boolean keyboard_active;
+	struct widget_instance *previous_hover;
 
 	ui_debug_frame++;
 	pointer_active = halo_ui_pointer_update(ui_mouse_menus_active(), &pointer) != 0;
@@ -7502,42 +7593,47 @@ static void ui_widgets_process_mouse(
 			ui_mouse_press(_widget_event_b_button);
 		if (pointer.wheel_steps && ui_mouse_menu())
 		{
-			boolean touch = pointer.touch != 0;
-			struct widget_instance *widget = ui_mouse_wheel_widget(ui_mouse_menu(), touch);
+			struct widget_instance *focused = ui_mouse_menu();
 			boolean going_forward = pointer.wheel_steps < 0;
-			short back = _widget_event_dpad_up, forward = _widget_event_dpad_down, button;
+			short button, opposite;
 			long room = NONE;
 			long index;
 			long step;
 
-			if (widget)
-				ui_mouse_list_directions(widget, &back, &forward);
-			/* a sideways PC widget (typically a screen's button bar) steps
-			sideways only, and the d-pad's up and down pass over it to a widget
-			above it on the focus's way, so a touch drag or the wheel leaves it
-			the same way (the wheel, past a list's last row onto the bar, went
-			back and forth between its buttons) */
-			if (widget && back == _widget_event_dpad_left && pc_menu_tag(widget->definition_tag_index) &&
-				ui_mouse_wheel_room(ui_mouse_menu(), _widget_event_dpad_up, FALSE) != NONE)
+			/* (a spinner is the end of the way: its own items are not the focus) */
+			while (focused->focused_child && focused->type != _ui_widget_type_spinner_list)
+				focused = focused->focused_child;
+			if (ui_mouse_category_spinner(focused))
 			{
-				back = _widget_event_dpad_up;
-				forward = _widget_event_dpad_down;
+				/* a category slider with the focus: the wheel steps it, and nothing else */
+				button = going_forward ? _widget_event_dpad_right : _widget_event_dpad_left;
 			}
-			button = going_forward ? forward : back;
-			/* only a touch drag stops at the ends, and does nothing with no list
-			to step; the desktop wheel wraps as the d-pad does, and falls back
-			to up and down */
-			if (touch)
+			else
 			{
-				room = widget ? ui_mouse_wheel_room(ui_mouse_menu(), button, going_forward) : 0;
+				button = going_forward ? _widget_event_dpad_down : _widget_event_dpad_up;
+				room = ui_mouse_wheel_room(ui_mouse_menu(), button, going_forward);
+				if (room == NONE)
+				{
+					/* no list steps up and down here (a spinner of several items): it steps sideways */
+					button = going_forward ? _widget_event_dpad_right : _widget_event_dpad_left;
+					room = ui_mouse_wheel_room(ui_mouse_menu(), button, going_forward);
+				}
+				if (room == NONE)
+					room = 0;
+				opposite = button == _widget_event_dpad_down ? _widget_event_dpad_up :
+					button == _widget_event_dpad_up ? _widget_event_dpad_down :
+					button == _widget_event_dpad_right ? _widget_event_dpad_left : _widget_event_dpad_right;
 				/* the presses still waiting step the list first */
-				for (index = 0; widget && room != NONE && index < ui_mouse_press_count; index++)
+				for (index = 0; index < ui_mouse_press_count; index++)
 				{
 					if (ui_mouse_presses[index] == button)
 						room = MAX(room - 1, 0);
-					else if (ui_mouse_presses[index] == (going_forward ? back : forward))
+					else if (ui_mouse_presses[index] == opposite)
 						room++;
 				}
+				/* the end of the list: the cue that it moved, and nothing more */
+				if (room == 0)
+					ui_play_audio_feedback_sound(_ui_audio_feedback_cursor);
 			}
 			for (step = 0; step < ABS(pointer.wheel_steps) && step < 4 && (room == NONE || step < room); step++)
 				ui_mouse_press(button);
@@ -7545,6 +7641,8 @@ static void ui_widgets_process_mouse(
 		if (!ui_mouse_press_count && ui_mouse_hover_pending)
 		{
 			ui_mouse_hover_pending = FALSE;
+			previous_hover = ui_mouse_hover_row;
+			ui_mouse_hover_row = NULL;
 			target = ui_mouse_target_at(ui_mouse_hover_x, ui_mouse_hover_y);
 			if (target)
 			{
@@ -7552,6 +7650,21 @@ static void ui_widgets_process_mouse(
 				{
 				case _ui_mouse_target_item:
 				case _ui_mouse_target_value:
+					/* port: a column list that is itself an item (a screen's bar of buttons) is only the box
+					around its items: it does nothing, so its first button is not hovered for the whole bar */
+					if (target->widget->type == _ui_widget_type_column_list && target->widget->focused_child)
+						break;
+					if (ui_mouse_scroll_row(target->widget))
+						break;
+					/* port: the rows of a map's own lists are only shown hovered (white text, the cursor
+					sound): the focus, and what it chooses, stay until a click */
+					if (ui_mouse_hover_only_row(target->widget))
+					{
+						ui_mouse_hover_row = target->widget;
+						if (ui_mouse_hover_row != previous_hover)
+							ui_play_audio_feedback_sound(_ui_audio_feedback_cursor);
+						break;
+					}
 					/* (a selection list's row is chosen by a click, not
 					by passing over it on the way to its buttons) */
 					if (!ui_mouse_selection_row(target->widget))
@@ -7578,6 +7691,7 @@ static void ui_widgets_process_mouse(
 			ui_mouse_click_pending = FALSE;
 			/* port: (ui_mouse_hovered_last) */
 			ui_mouse_hovered_last = FALSE;
+			ui_mouse_hover_row = NULL;
 			target = ui_mouse_target_at(ui_mouse_click_x, ui_mouse_click_y);
 			if (ui_debug_targets_enabled())
 				ui_debug_log_click(ui_mouse_click_x, ui_mouse_click_y, target, ui_debug_frame - ui_debug_click_frame);
@@ -7591,6 +7705,12 @@ static void ui_widgets_process_mouse(
 					target), does nothing: A would press the item last focused */
 					if (target->widget->type == _ui_widget_type_column_list && target->widget->focused_child)
 						break;
+					/* port: the gametype list's scroll rows page the list at once, whatever has the focus */
+					if (pc_menu_gametype_scroll_row(target->widget))
+					{
+						pc_menu_gametype_scroll_click(target->widget);
+						break;
+					}
 					/* (a selection list's row: chosen by a click, used by
 					a click on it chosen) */
 					if (ui_mouse_selection_row(target->widget) && target->widget->parent &&
@@ -8273,26 +8393,49 @@ static __inline void spinner_list_update(
 spinner list and the column list keep separate updaters rather than sharing one
 parameterised helper */
 
+/* port: the row of a list last focused, kept while the focus is on the list's buttons */
+static struct widget_instance *column_remembered_list = NULL;
+static struct widget_instance *column_remembered_row = NULL;
+
 static void column_list_update(
 	struct widget_instance *widget,
 	struct ui_widget_definition *definition)
 {
 	struct widget_instance *child;
+	struct widget_instance *focused = widget->focused_child;
+	boolean scroll_list = !strcmp(widget->name, "select_screen_list_template") ||
+		!strcmp(widget->name, "color_select_list");
 
 	/* port: a map's own lists have rows of three frames */
-	boolean own_list = !strcmp(widget->name, "select_screen_list_template") ||
+	boolean own_list = scroll_list ||
 		!strcmp(widget->name, "gametype_select_list") ||
-		!strcmp(widget->name, "color_select_list") ||
 		!strcmp(widget->name, "gamepad_avail_list") ||
 		!strcmp(widget->name, "gamepad_used_list");
+
+	if (focused && focused->name && !strncmp(focused->name, "list_item_", 10) &&
+		!(scroll_list && (!strcmp(focused->name, "list_item_0") || !strcmp(focused->name, "list_item_10"))))
+	{
+		column_remembered_list = widget;
+		column_remembered_row = focused;
+	}
 	for (child = widget->child; child; child = child->next)
 	{
 		boolean has_frames = child->animation.number_of_sprite_frames == 2 ||
 			(own_list && child->animation.number_of_sprite_frames == 3);
+		boolean row = child->name && !strncmp(child->name, "list_item_", 10);
 
 		if (!has_frames)
 			continue;
-		child->animation.current_frame_index = child == widget->focused_child ? 1 : 0;
+		/* port: the scroll rows of the map list and the colour screen are never drawn selected */
+		if (scroll_list && (!strcmp(child->name, "list_item_0") || !strcmp(child->name, "list_item_10")))
+		{
+			child->animation.current_frame_index = 0;
+			continue;
+		}
+		if (row && column_remembered_list == widget && column_remembered_row)
+			child->animation.current_frame_index = child == column_remembered_row ? 1 : 0;
+		else
+			child->animation.current_frame_index = child == focused ? 1 : 0;
 	}
 
 	return;
@@ -8456,6 +8599,7 @@ static void widget_instance_process_one_event_recursive(
 		ui_mouse_focused_last = FALSE;
 		/* port: (ui_mouse_hovered_last) */
 		ui_mouse_hovered_last = FALSE;
+		ui_mouse_hover_row = NULL;
 	}
 	if (event->type == _event_type_button &&
 		event->data.button.value > 1 &&

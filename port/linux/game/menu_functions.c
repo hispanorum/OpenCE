@@ -1112,20 +1112,26 @@ static short map_kind_first(short chosen, short count)
 
 static boolean list_scrolls_at_end(void);
 
+static void scroll_button_set(struct widget_instance *row, char const *name, boolean shown, boolean enabled);
+
 static void map_kind_focus(struct widget_instance *list, short first, short chosen)
 {
 	focus_row(list, (short)(1 + chosen - first));
 }
 
-/* the rows after the chooser: count entries from *first's, scrolled on at
-their ends; the entry focused, NONE when the chooser or the buttons have the
-focus */
+/* port: the entry of a map list that is chosen, kept while the focus is on its chooser or buttons: the rows are
+reused across pages, so the selected frame follows the entry, not the row */
+static struct widget_instance *map_kind_chosen_list = NULL;
+static void (*map_kind_chosen_text)(short entry, wchar_t *text) = NULL;
+static short map_kind_chosen_entry = NONE;
+
 static short map_kind_rows_update(struct widget_instance *list, short *first, short count,
 	void (*entry_text)(short entry, wchar_t *text))
 {
 	short rows = !strcmp(list->name, "select_screen_list_template") ? 9 : MAP_KIND_ROWS;
 	short shown = (short)MIN(count, rows);
 	short row = focused_row(list), index = 0;
+	short focused_entry;
 	struct widget_instance *child;
 
 	if (row != NONE && row >= 1 && row == shown && *first + shown < count && list_scrolls_at_end())
@@ -1138,6 +1144,15 @@ static short map_kind_rows_update(struct widget_instance *list, short *first, sh
 		(*first)--;
 		focus_row(list, ++row);
 	}
+	focused_entry = row == NONE || row < 1 || row > shown ? NONE : (short)(*first + row - 1);
+	if (map_kind_chosen_list != list || map_kind_chosen_text != entry_text)
+	{
+		map_kind_chosen_list = list;
+		map_kind_chosen_text = entry_text;
+		map_kind_chosen_entry = NONE;
+	}
+	if (focused_entry != NONE)
+		map_kind_chosen_entry = focused_entry;
 	for (child = list->child; child; child = child->next, index++)
 	{
 		wchar_t text[ROW_TEXT_LENGTH];
@@ -1151,13 +1166,18 @@ static short map_kind_rows_update(struct widget_instance *list, short *first, sh
 		{
 			entry_text((short)(*first + index - 1), text);
 			text_set(named(child, "list_item_text", 0), text);
+			if (child->animation.number_of_sprite_frames == 2 || child->animation.number_of_sprite_frames == 3)
+			{
+				child->animation.current_frame_index =
+					(short)(*first + index - 1) == map_kind_chosen_entry ? 1 : 0;
+			}
 		}
 		visible_set(named(child, "list_item_arrows", 0),
-			child == list->focused_child && strcmp(list->name, "select_screen_list_template"));		
+			child == list->focused_child && strcmp(list->name, "select_screen_list_template"));
 		visible_set(named(child, "scroll_up_button", 0), FALSE);
 		visible_set(named(child, "scroll_down_button", 0), FALSE);
 	}
-	return row == NONE || row < 1 || row > shown ? NONE : (short)(*first + row - 1);
+	return focused_entry;
 }
 
 /* the Xbox's multiplayer maps: the first of the multiplayer maps
@@ -2272,12 +2292,33 @@ boolean pc_menu_color_row_click(struct widget_instance *row)
 static boolean color_row_click_paging(struct widget_instance *row)
 {
 	if (!strcmp(row->name, "list_item_0"))
+	{
+		if (color_list.first > 0)
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
 		color_list.first = (short)MAX(0, color_list.first - COLOR_OWN_ROWS);
+	}
 	else if (!strcmp(row->name, "list_item_10"))
+	{
+		if (color_list.first + COLOR_OWN_ROWS < COLOR_COUNT)
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
 		color_list.first = (short)MIN(COLOR_COUNT - COLOR_OWN_ROWS, color_list.first + COLOR_OWN_ROWS);
+	}
 	else
 		return TRUE;
 	return FALSE;
+}
+
+/* port: a map's own list's scroll button (its first and last rows): shown always on its row, greyed when there
+is nothing to scroll to, its picture's second frame (a guess) while the focus is on its row. Other rows hide it. */
+static void scroll_button_set(struct widget_instance *row, char const *name, boolean shown, boolean enabled)
+{
+	struct widget_instance *button = named(row, name, 0);
+
+	if (!button)
+		return;
+	button->visible = shown;
+	button->alpha_modifier = enabled ? 1.0f : 0.5f;
+	button->animation.current_frame_index = 0;
 }
 
 static void color_own_list_update(struct widget_instance *list)
@@ -2314,13 +2355,14 @@ static void color_own_list_update(struct widget_instance *list)
 			text_set(named(row, "list_item_text", 0), color_names[color]);
 		visible_set(named(row, "list_item_text", 0), is_color);
 		visible_set(named(row, "list_item_arrows", 0), FALSE);
-		visible_set(named(row, "scroll_up_button", 0), index == 0 && color_list.first > 0);
-		visible_set(named(row, "scroll_down_button", 0),
-			index == COLOR_OWN_ROWS + 1 && color_list.first + COLOR_OWN_ROWS < COLOR_COUNT);
+		scroll_button_set(row, "scroll_up_button", index == 0, color_list.first > 0);
+		scroll_button_set(row, "scroll_down_button", index == COLOR_OWN_ROWS + 1,
+			color_list.first + COLOR_OWN_ROWS < COLOR_COUNT);
 		/* the bitmap shows only the colour the profile has (the third frame); passing the focus over a row
 		changes its text's colour alone */
 		if (row->animation.number_of_sprite_frames == 2)
-			row->animation.current_frame_index = (row == list->focused_child) ? 1 : 0;
+			row->animation.current_frame_index =
+				(is_color && color < COLOR_COUNT && color == color_list.color) ? 1 : 0;
 	}
 	if ((widget = named(description, "color_right_name", 0)) != NULL)
 		widget->parameters.text_box.string_list_index = color_list.color;
@@ -2543,59 +2585,90 @@ short pc_menu_mouse_function(struct widget_instance *widget, word function)
 	return TRUE;
 }
 
-/* port: a Custom Edition map's audio screen is Halo PC's own: created 123, OK 124, Defaults 134. Its volume
-spinners' eleven steps are 0 to 10 tenths; its environmental sound (OFF, EAX) is the port's reverb */
-static struct
-{
-	short master;
-	short effects;
-	short music;
-	short reverb;
-} audio_loaded;
-
-static struct widget_instance *audio_list_of(struct widget_instance *widget)
-{
-	struct widget_instance *top;
-
-	if (!strcmp(widget->name, "audio_options_menu"))
-		return widget;
-	top = screen_of(widget);
-	return !strcmp(top->name, "audio_settings_screen") ? named(top, "audio_options_menu", 0) : NULL;
-}
-
-static short audio_step_read(char const *name, boolean defaults)
-{
-	char text[64];
-
-	if (!setting_text(name, text, sizeof(text), defaults))
-		return 10;
-	return (short)PIN((long)(atof(text) * 10.0 + 0.5), 0, 10);
-}
-
-/* port: the audio screen's added rows: SOUND, VOICE CHAT, VOICE VOLUME and RESAMPLER */
-static wchar_t const *const audio_on_off_names[2] = { L"OFF", L"ON" };
-static wchar_t const *const audio_voice_names[3] = { L"PUSH TO TALK", L"OPEN MIC", L"OFF" };
-static wchar_t const *const audio_resampler_names[2] = { L"SINC", L"LINEAR" };
-static char const *const audio_voice_values[3] = { "push_to_talk", "open_mic", "off" };
-
-static struct
-{
-	short sound;
-	short voice_chat;
-	short voice_volume;
-	short resampler;
-} audio_extra_loaded;
-
-/* port: the audio screen's OUTPUT DEVICE and INPUT DEVICE rows: SYSTEM DEFAULT, then the devices SDL finds */
+/* port: a Custom Edition map's audio screen is Halo PC's own: created 123, OK 124, Defaults 134. As the video
+screen's, its rows are rebuilt as copies of the volume row (the map's own rows are deleted), on two pages: the
+main one, and Sound Processing, opened from an entry row at the end of the main page. */
 int platform_audio_devices(int recording, char (*names)[128], int maximum);
 
 #define AUDIO_DEVICE_MAX 16
+#define AUDIO_MAX 16
+#define AUDIO_ENTRIES 1
+/* the distance between rows (a guess: nine rows must fit above the description) */
+#define AUDIO_ROW_PITCH 28
 
+enum
+{
+	A_OUTPUT, A_INPUT, A_MASTER, A_MUSIC, A_EFFECTS, A_SOUND, A_VOICE_CHAT, A_VOICE_VOLUME,
+	A_REVERB, A_HRTF, A_RESAMPLER, A_DOPPLER,
+	AUDIO_CHOICES
+};
+
+struct audio_row
+{
+	char const *key;
+	wchar_t const *label;
+	wchar_t const *help;
+	short page;
+};
+
+static struct audio_row const audio_rows[AUDIO_CHOICES] =
+{
+	{ "audio.output_device", L"OUTPUT DEVICE:", L"Where the game's sound and the voices play.", 0 },
+	{ "audio.input_device", L"INPUT DEVICE:", L"The microphone voice chat listens to.", 0 },
+	{ "audio.volume", L"MASTER VOLUME:", L"The volume of everything.", 0 },
+	{ "audio.music_volume", L"MUSIC VOLUME:", L"The music's volume.", 0 },
+	{ "audio.effects_volume", L"EFFECTS VOLUME:", L"The volume of every other sound: effects and\r\nspeech.", 0 },
+	{ "audio.enabled", L"SOUND:", L"Play sound at all; from the next time the\r\ngame starts.", 0 },
+	{ "audio.voice_chat", L"VOICE CHAT:",
+		L"Talk in network games: while push to talk is\r\nheld, whenever you speak, or never.", 0 },
+	{ "audio.voice_volume", L"VOICE VOLUME:", L"The other players' voices.", 0 },
+	{ "audio.reverb", L"REVERB:",
+		L"Echo sounds as the place you are in does, and\r\nmuffle those behind walls, as the Xbox did.", 1 },
+	{ "audio.hrtf", L"3D HRTF:",
+		L"Xbox-style directional sound for headphones\r\nand speakers. On by default.", 1 },
+	{ "audio.resampler", L"RESAMPLER:",
+		L"Xbox models the original sound. Sinc reduces\r\naliasing; linear gives a brighter sound.", 1 },
+	{ "audio.stereo_doppler", L"STEREO DOPPLER:",
+		L"Shift stereo sounds' pitch as they come and go,\r\nas 3D sounds' is. The Xbox played them flat.", 1 },
+};
+
+static wchar_t const *const audio_entry_label = L"SOUND PROCESSING:";
+static wchar_t const *const audio_entry_help =
+	L"Directional sound, reverb and how sounds are\r\nconverted to the output's rate. Step it to open.";
+static wchar_t const *const audio_open_names[2] = { L"OPEN", L"OPEN" };
+
+static wchar_t const *const audio_off_on_names[2] = { L"OFF", L"ON" };
+static char const *const audio_off_on_values[2] = { "false", "true" };
+static wchar_t const *const audio_voice_names[3] = { L"PUSH TO TALK", L"OPEN MIC", L"OFF" };
+static char const *const audio_voice_values[3] = { "push_to_talk", "open_mic", "off" };
+static wchar_t const *const audio_resampler_names[3] = { L"SINC", L"LINEAR", L"XBOX" };
+static char const *const audio_resampler_values[3] = { "sinc", "linear", "xbox" };
+static wchar_t const *const audio_volume_names[11] =
+	{ L"0", L"1", L"2", L"3", L"4", L"5", L"6", L"7", L"8", L"9", L"10" };
+static char const *const audio_volume_values[11] =
+	{ "0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1" };
+
+/* the output and input devices SDL finds, after SYSTEM DEFAULT */
 static char audio_device_real[2][AUDIO_DEVICE_MAX][128];
+static char const *audio_device_real_pointers[2][AUDIO_DEVICE_MAX];
 static wchar_t audio_device_shown[2][AUDIO_DEVICE_MAX][32];
 static wchar_t const *audio_device_pointers[2][AUDIO_DEVICE_MAX];
 static short audio_device_count[2];
-static short audio_device_loaded[2];
+
+struct audio_choice
+{
+	wchar_t const *shown[AUDIO_MAX];
+	char const *real[AUDIO_MAX];
+	short count;
+	short loaded;
+	short value;
+};
+
+static struct audio_choice audio_choices[AUDIO_CHOICES];
+/* the row the injected rows are copies of, kept: the map's own rows are deleted when the first page is built */
+static struct widget_instance audio_template;
+static short audio_page;
+static struct widget_instance *audio_entries[AUDIO_ENTRIES];
 
 static void audio_device_read(short recording)
 {
@@ -2625,237 +2698,263 @@ static void audio_device_read(short recording)
 			ustrncpy(audio_device_shown[recording][index] + 15, L"...", 4);
 	}
 	for (index = 0; index <= added; index++)
+	{
 		audio_device_pointers[recording][index] = audio_device_shown[recording][index];
+		audio_device_real_pointers[recording][index] = audio_device_real[recording][index];
+	}
 	audio_device_count[recording] = (short)(added + 1);
 }
 
-static void audio_device_show(struct widget_instance *list, boolean defaults)
+static void audio_choice_set(struct audio_choice *choice, wchar_t const *const *shown, char const *const *real,
+	short count)
+{
+	short index;
+
+	for (index = 0; index < count && index < AUDIO_MAX; index++)
+	{
+		choice->shown[index] = shown[index];
+		choice->real[index] = real[index];
+	}
+	choice->count = index;
+}
+
+static void audio_choices_read(void)
 {
 	short recording;
 
+	memset(audio_choices, 0, sizeof(audio_choices));
 	for (recording = 0; recording < 2; recording++)
 	{
-		struct widget_instance *spinner = row_spinner(named(list, "op_master_volume", 3 + recording));
-		char text[128];
-		short index, found = 0;
+		audio_device_read(recording);
+		audio_choice_set(&audio_choices[recording ? A_INPUT : A_OUTPUT], audio_device_pointers[recording],
+			audio_device_real_pointers[recording], audio_device_count[recording]);
+	}
+	audio_choice_set(&audio_choices[A_MASTER], audio_volume_names, audio_volume_values, 11);
+	audio_choice_set(&audio_choices[A_MUSIC], audio_volume_names, audio_volume_values, 11);
+	audio_choice_set(&audio_choices[A_EFFECTS], audio_volume_names, audio_volume_values, 11);
+	audio_choice_set(&audio_choices[A_VOICE_VOLUME], audio_volume_names, audio_volume_values, 11);
+	audio_choice_set(&audio_choices[A_SOUND], audio_off_on_names, audio_off_on_values, 2);
+	audio_choice_set(&audio_choices[A_VOICE_CHAT], audio_voice_names, audio_voice_values, 3);
+	audio_choice_set(&audio_choices[A_REVERB], audio_off_on_names, audio_off_on_values, 2);
+	audio_choice_set(&audio_choices[A_HRTF], audio_off_on_names, audio_off_on_values, 2);
+	audio_choice_set(&audio_choices[A_RESAMPLER], audio_resampler_names, audio_resampler_values, 3);
+	audio_choice_set(&audio_choices[A_DOPPLER], audio_off_on_names, audio_off_on_values, 2);
+}
 
-		if (!spinner)
-			continue;
-		if (setting_text(recording ? "audio.input_device" : "audio.output_device", text, sizeof(text), defaults))
+static struct widget_instance *audio_list_of(struct widget_instance *widget)
+{
+	struct widget_instance *top;
+
+	if (!strcmp(widget->name, "audio_options_menu"))
+		return widget;
+	top = screen_of(widget);
+	return !strcmp(top->name, "audio_settings_screen") ? named(top, "audio_options_menu", 0) : NULL;
+}
+
+/* how many choices a page has, and the place of a choice among them */
+static short audio_page_count(short page)
+{
+	short choice, count = 0;
+
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
+	{
+		if (audio_rows[choice].page == page)
+			count++;
+	}
+	return count;
+}
+
+static short audio_nth(short choice)
+{
+	short index, nth = 0;
+
+	for (index = 0; index < choice; index++)
+	{
+		if (audio_rows[index].page == audio_rows[choice].page)
+			nth++;
+	}
+	return nth;
+}
+
+/* the spinner of a choice on the page shown, else NULL */
+static struct widget_instance *audio_choice_spinner(struct widget_instance *list, short choice)
+{
+	if (audio_rows[choice].page != audio_page)
+		return NULL;
+	return row_spinner(named(list, "op_master_volume", audio_nth(choice)));
+}
+
+/* the values the settings have (or, with defaults, their defaults) */
+static void audio_values_read(boolean defaults)
+{
+	short choice, index;
+
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
+	{
+		char text[128];
+		short found = 0;
+
+		if (setting_text(audio_rows[choice].key, text, sizeof(text), defaults))
 		{
-			for (index = 0; index < audio_device_count[recording]; index++)
+			for (index = 0; index < audio_choices[choice].count; index++)
 			{
-				if (!strcmp(text, audio_device_real[recording][index]))
+				double first, second;
+
+				if (!strcmp(text, audio_choices[choice].real[index]) ||
+					(text_is_number(text, &first) && text_is_number(audio_choices[choice].real[index], &second) &&
+					first == second))
+				{
 					found = index;
+				}
 			}
 		}
-		spinner->parameters.list.selected_index = found;
+		audio_choices[choice].value = found;
 		if (!defaults)
-			audio_device_loaded[recording] = found;
+			audio_choices[choice].loaded = found;
 	}
 }
 
-static void audio_device_save(struct widget_instance *list)
+/* the spinners of the page shown set to the values held */
+static void audio_apply(struct widget_instance *list)
 {
-	short recording;
+	short choice;
 
-	for (recording = 0; recording < 2; recording++)
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
 	{
-		struct widget_instance *spinner = row_spinner(named(list, "op_master_volume", 3 + recording));
-		short index;
+		struct widget_instance *spinner = audio_choice_spinner(list, choice);
 
-		if (!spinner)
-			continue;
-		index = spinner->parameters.list.selected_index;
-		if (index < 0 || index >= audio_device_count[recording] || index == audio_device_loaded[recording])
-			continue;
-		audio_device_loaded[recording] = index;
-		setting_write(recording ? "audio.input_device" : "audio.output_device",
-			audio_device_real[recording][index]);
+		if (spinner)
+			spinner->parameters.list.selected_index = audio_choices[choice].value;
 	}
+}
+
+/* the values the spinners of the page shown have, held (before the page changes, or OK) */
+static void audio_capture(struct widget_instance *list)
+{
+	short choice;
+
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
+	{
+		struct widget_instance *spinner = audio_choice_spinner(list, choice);
+
+		if (spinner && audio_choices[choice].count)
+			audio_choices[choice].value = (short)PIN(spinner->parameters.list.selected_index, 0,
+				audio_choices[choice].count - 1);
+	}
+}
+
+/* the rows of a page made (those there deleted), the focus on its row `focus` */
+static void audio_build(struct widget_instance *list, short page, short focus)
+{
+	struct widget_instance *bar = named(list, "audio_button_bar", 0);
+	struct widget_instance *row;
+	short choice, nth = 0, index;
+
+	if (!bar || !audio_template.parent)
+		return;
+	while ((row = named(list, "op_master_volume", 0)) != NULL)
+		ui_widget_delete(row);
+	memset(audio_entries, 0, sizeof(audio_entries));
+	audio_page = page;
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
+	{
+		if (audio_rows[choice].page != page)
+			continue;
+		ui_widget_port_inject_row(&audio_template, bar, (short)(73 + AUDIO_ROW_PITCH * nth),
+			audio_rows[choice].label, audio_rows[choice].help, audio_choices[choice].shown,
+			audio_choices[choice].count);
+		nth++;
+	}
+	if (page == 0)
+	{
+		ui_widget_port_inject_row(&audio_template, bar, (short)(73 + AUDIO_ROW_PITCH * nth),
+			audio_entry_label, audio_entry_help, audio_open_names, 2);
+		audio_entries[0] = row_spinner(named(list, "op_master_volume", nth));
+	}
+	/* (deleting a widget leaves the focus pointing at it) */
+	row = list->child;
+	for (index = 0; row && row->next && index < focus; index++)
+		row = row->next;
+	list->focused_child = row;
+	list->parameters.list.selected_index = index;
+	audio_apply(list);
+}
+
+/* each frame (the description's update): the entry row stepped opens its page */
+static void audio_pages_update(struct widget_instance *list)
+{
+	if (audio_page != 0 || !audio_entries[0])
+		return;
+	audio_entries[0]->visible = FALSE;
+	if (audio_entries[0]->parameters.list.selected_index != 0)
+	{
+		ui_play_audio_feedback_sound(SOUND_FORWARD);
+		audio_capture(list);
+		audio_build(list, 1, 0);
+	}
+}
+
+/* A on the entry row's (hidden) spinner: steps it, which opens the page. FALSE for any other widget. */
+boolean pc_menu_audio_open(struct widget_instance *widget)
+{
+	if (!widget || !widget->name || audio_page != 0 || !audio_entries[0] || !audio_list_of(widget))
+		return FALSE;
+	if (audio_entries[0] != widget)
+		return FALSE;
+	widget->parameters.list.selected_index = 1;
+	return TRUE;
+}
+
+/* back (the button, and B): from Sound Processing to the main page; FALSE on the main page, which the
+screen then leaves as usual */
+boolean pc_menu_audio_back(struct widget_instance *widget)
+{
+	struct widget_instance *list;
+
+	if (!widget || !widget->name || audio_page == 0 || strcmp(screen_of(widget)->name, "audio_settings_screen"))
+		return FALSE;
+	list = audio_list_of(widget);
+	if (!list)
+		return FALSE;
+	audio_capture(list);
+	audio_build(list, 0, audio_page_count(0));
+	return TRUE;
 }
 
 static void audio_inject(struct widget_instance *list)
 {
-	struct widget_instance *master = named(list, "op_master_volume", 0);
-	struct widget_instance *reverb = named(list, "op_environmental_sound", 0);
+	struct widget_instance *source = named(list, "op_master_volume", 0);
 	struct widget_instance *bar = named(list, "audio_button_bar", 0);
-
-	if (!master || !reverb || !bar || named(list, "op_master_volume", 1))
-		return;
-	ui_widget_port_inject_row(reverb, bar, 193, L"SOUND:",
-		L"Play sound at all; from the next time the\r\ngame starts.", audio_on_off_names, 2);
-	ui_widget_port_inject_row(master, bar, 223, L"VOICE CHAT:",
-		L"Talk in network games: while push to talk is\r\nheld, whenever you speak, or never.",
-		audio_voice_names, 3);
-	ui_widget_port_inject_row(master, bar, 253, L"VOICE VOLUME:",
-		L"The volume of the other players' voices.", NULL, 0);
-	ui_widget_port_inject_row(reverb, bar, 283, L"RESAMPLER:",
-		L"How sounds are converted to the output's rate.\r\nSinc is cleaner, linear is brighter.",
-		audio_resampler_names, 2);
-	audio_device_read(0);
-	audio_device_read(1);
-	ui_widget_port_inject_row(master, bar, 313, L"OUTPUT DEVICE:",
-		L"Where the game's sound and the voices play.", audio_device_pointers[0], audio_device_count[0]);
-	ui_widget_port_inject_row(master, bar, 343, L"INPUT DEVICE:",
-		L"The microphone voice chat listens to.", audio_device_pointers[1], audio_device_count[1]);
-}
-
-static void audio_extra_show(struct widget_instance *list, boolean defaults)
-{
-	struct widget_instance *spinner;
-	char text[64];
-	short sound = 1, chat = 0, resampler = 0, index;
-	short voice = audio_step_read("audio.voice_volume", defaults);
-
-	audio_device_show(list, defaults);
-	if (setting_text("audio.enabled", text, sizeof(text), defaults))
-		sound = !strcmp(text, "true") ? 1 : 0;
-	if (setting_text("audio.voice_chat", text, sizeof(text), defaults))
-	{
-		for (index = 0; index < 3; index++)
-		{
-			if (!strcmp(text, audio_voice_values[index]))
-				chat = index;
-		}
-	}
-	if (setting_text("audio.resampler", text, sizeof(text), defaults))
-		resampler = !strcmp(text, "linear") ? 1 : 0;
-	if ((spinner = row_spinner(named(list, "op_environmental_sound", 1))) != NULL)
-		spinner->parameters.list.selected_index = sound;
-	if ((spinner = row_spinner(named(list, "op_master_volume", 1))) != NULL)
-		spinner->parameters.list.selected_index = chat;
-	if ((spinner = row_spinner(named(list, "op_master_volume", 2))) != NULL)
-		spinner->parameters.list.selected_index = voice;
-	if ((spinner = row_spinner(named(list, "op_environmental_sound", 2))) != NULL)
-		spinner->parameters.list.selected_index = resampler;
-	if (!defaults)
-	{
-		audio_extra_loaded.sound = sound;
-		audio_extra_loaded.voice_chat = chat;
-		audio_extra_loaded.voice_volume = voice;
-		audio_extra_loaded.resampler = resampler;
-	}
-}
-
-static void audio_extra_save(struct widget_instance *list)
-{
-	struct widget_instance *spinner;
-	char text[16];
-	short value;
-
-	if ((spinner = row_spinner(named(list, "op_environmental_sound", 1))) != NULL &&
-		spinner->parameters.list.selected_index != audio_extra_loaded.sound)
-	{
-		audio_extra_loaded.sound = spinner->parameters.list.selected_index;
-		setting_write("audio.enabled", audio_extra_loaded.sound ? "true" : "false");
-	}
-	if ((spinner = row_spinner(named(list, "op_master_volume", 1))) != NULL)
-	{
-		value = (short)PIN(spinner->parameters.list.selected_index, 0, 2);
-		if (value != audio_extra_loaded.voice_chat)
-		{
-			audio_extra_loaded.voice_chat = value;
-			setting_write("audio.voice_chat", audio_voice_values[value]);
-		}
-	}
-	if ((spinner = row_spinner(named(list, "op_master_volume", 2))) != NULL)
-	{
-		value = (short)PIN(spinner->parameters.list.selected_index, 0, 10);
-		if (value != audio_extra_loaded.voice_volume)
-		{
-			audio_extra_loaded.voice_volume = value;
-			snprintf(text, sizeof(text), "%g", value / 10.0);
-			setting_write("audio.voice_volume", text);
-		}
-	}
-	if ((spinner = row_spinner(named(list, "op_environmental_sound", 2))) != NULL &&
-		spinner->parameters.list.selected_index != audio_extra_loaded.resampler)
-	{
-		audio_extra_loaded.resampler = spinner->parameters.list.selected_index;
-		setting_write("audio.resampler", audio_extra_loaded.resampler ? "linear" : "sinc");
-	}
-}
-
-static void audio_show(struct widget_instance *list, boolean defaults)
-{
-	struct widget_instance *spinner;
-	char text[64];
-	short master = audio_step_read("audio.volume", defaults);
-	short effects = audio_step_read("audio.effects_volume", defaults);
-	short music = audio_step_read("audio.music_volume", defaults);
-	short reverb = 1;
-
-	if (setting_text("audio.reverb", text, sizeof(text), defaults))
-		reverb = !strcmp(text, "true") ? 1 : 0;
-	audio_extra_show(list, defaults);
-	if ((spinner = named(list, "master_volume_spinner", 0)) != NULL)
-		spinner->parameters.list.selected_index = master;
-	if ((spinner = named(list, "effects_volume_spinner", 0)) != NULL)
-		spinner->parameters.list.selected_index = effects;
-	if ((spinner = named(list, "music_volume_spinner", 0)) != NULL)
-		spinner->parameters.list.selected_index = music;
-	if ((spinner = named(list, "environmental_sound_spinner", 0)) != NULL)
-		spinner->parameters.list.selected_index = reverb;
-	if (!defaults)
-	{
-		audio_loaded.master = master;
-		audio_loaded.effects = effects;
-		audio_loaded.music = music;
-		audio_loaded.reverb = reverb;
-	}
-}
-
-static void audio_step_save(struct widget_instance *spinner, short *loaded, char const *name)
-{
-	short step;
-	char text[16];
-
-	if (!spinner)
-		return;
-	step = (short)PIN(spinner->parameters.list.selected_index, 0, 10);
-	if (step == *loaded)
-		return;
-	snprintf(text, sizeof(text), "%g", step / 10.0);
-	setting_write(name, text);
-	*loaded = step;
-}
-
-/* port: the rows with no port setting behind them are removed (hardware acceleration, sound quality, sound
-variety), and environmental sound takes the first free place */
-static void audio_trim(struct widget_instance *list)
-{
-	static char const *const unused_rows[] =
-	{
-		"op_software_buffers", "op_supplementary_buffers", "op_sound_variety"
-	};
 	struct widget_instance *row;
-	short index;
+	struct widget_instance *next;
 
-	for (index = 0; index < (short)NUMBEROF(unused_rows); index++)
+	if (!source || !bar)
+		return;
+	audio_template = *source;
+	audio_choices_read();
+	audio_values_read(FALSE);
+	/* the map's own rows go */
+	for (row = list->child; row; row = next)
 	{
-		row = named(list, unused_rows[index], 0);
-		if (row)
+		next = row->next;
+		if (!strncmp(row->name, "op_", 3))
 			ui_widget_delete(row);
 	}
-	row = named(list, "op_environmental_sound", 0);
-	if (row)
-		row->vertical_offset = 163;
+	audio_build(list, 0, 0);
 }
 
-static void audio_save(struct widget_instance *list)
+static void audio_save(void)
 {
-	struct widget_instance *reverb = named(list, "environmental_sound_spinner", 0);
+	short choice;
 
-	audio_extra_save(list);
-	audio_device_save(list);
-	audio_step_save(named(list, "master_volume_spinner", 0), &audio_loaded.master, "audio.volume");
-	audio_step_save(named(list, "effects_volume_spinner", 0), &audio_loaded.effects, "audio.effects_volume");
-	audio_step_save(named(list, "music_volume_spinner", 0), &audio_loaded.music, "audio.music_volume");
-	if (reverb && reverb->parameters.list.selected_index != audio_loaded.reverb)
+	for (choice = 0; choice < AUDIO_CHOICES; choice++)
 	{
-		audio_loaded.reverb = reverb->parameters.list.selected_index;
-		setting_write("audio.reverb", audio_loaded.reverb ? "true" : "false");
+		short index = audio_choices[choice].value;
+
+		if (index < 0 || index >= audio_choices[choice].count || index == audio_choices[choice].loaded)
+			continue;
+		audio_choices[choice].loaded = index;
+		setting_write(audio_rows[choice].key, audio_choices[choice].real[index]);
 	}
 }
 
@@ -2868,14 +2967,28 @@ short pc_menu_audio_function(struct widget_instance *widget, word function)
 		return NONE;
 	if (function == 123)
 	{
-		audio_trim(list);
+		audio_page = 0;
+		memset(audio_entries, 0, sizeof(audio_entries));
 		audio_inject(list);
-		audio_show(list, FALSE);
 	}
 	else if (function == 124)
-		audio_save(list);
+	{
+		audio_capture(list);
+		audio_save();
+		/* port: a submenu's OK returns to the main page. The OK handler goes back by itself after the
+		function succeeds, even if widget_deleted is set; a failed function skips the rest of the handler,
+		so failing here keeps the screen open. This logs "event handler function 124 failed" (harmless). */
+		if (audio_page != 0)
+		{
+			audio_build(list, 0, audio_page_count(0));
+			return FALSE;
+		}
+	}
 	else if (function == 134)
-		audio_show(list, TRUE);
+	{
+		audio_values_read(TRUE);
+		audio_apply(list);
+	}
 	else
 		return NONE;
 	return TRUE;
@@ -2883,13 +2996,112 @@ short pc_menu_audio_function(struct widget_instance *widget, word function)
 
 /* port: a Custom Edition map's video screen is Halo PC's own: created 114, OK 125, Defaults 135. Its rows
 (resolution, refresh rate, frame rate, specular, shadows, decals, particles, texture quality, gamma) have no
-port setting behind them, so they are replaced by the port's own: display mode, resolution, window size,
-V-Sync and frame rate limit (copies of the specular row, which has a string list) */
+port setting behind them, so they are replaced by the port's own, copies of the specular row (it has a string
+list). The screen has four pages: the main one, and three submenus (graphics, fov and viewmodels, extra
+effects) opened from entry rows at the end of the main page, as the network screen's second page is. A page
+is built by deleting the rows of the other (a hidden row of a map's own list would still take the focus). */
 int platform_display_resolutions(long *widths, long *heights, int maximum);
 int platform_window_sizes(long *widths, long *heights, int maximum);
 
 #define VIDEO_MAX 64
-#define VIDEO_CHOICES 5
+#define VIDEO_CHOICES 32
+#define VIDEO_ENTRIES 3
+/* the distance between rows: eleven fit above the description at 26 (a guess, not seen on screen) */
+#define VIDEO_ROW_PITCH 26
+
+enum
+{
+	V_MODE, V_RESOLUTION, V_WINDOW, V_SCALING, V_VSYNC, V_FPS, V_SMOOTH, V_INSTANT,
+	V_SHOW_FPS, V_HUD, V_TEXT, V_WIDE, V_AA, V_TEXFILTER, V_SHADOW, V_PPL, V_MODEL,
+	V_FOV, V_VMFOV, V_VIEWMODELS, V_PASSENGER, V_ARMSHIELD, V_LEGS, V_SHIELDCOLOR,
+	V_OVERSHIELD, V_GLOW, V_GLOWINT, V_HDR, V_HDRDISPLAY, V_TONE, V_PAPER, V_PEAK
+};
+
+struct video_row
+{
+	char const *key;
+	wchar_t const *label;
+	wchar_t const *help;
+	short page;
+};
+
+static struct video_row const video_rows[VIDEO_CHOICES] =
+{
+	{ "display.mode", L"DISPLAY MODE:",
+		L"Fullscreen takes the display; borderless covers\r\nit with a window. F11 switches to the window.", 0 },
+	{ "display.resolution", L"RESOLUTION:",
+		L"What fullscreen and borderless draw at. Native\r\nis the display's own.", 0 },
+	{ "display.window_size", L"WINDOW SIZE:", L"The size of the window, for the windowed mode.", 0 },
+	{ "display.resolution_scaling", L"RESOLUTION SCALING:",
+		L"Native draws at the resolution, 75% to 25% that\r\npart each way; Original, the Xbox's 480 lines.", 0 },
+	{ "display.vsync", L"V-SYNC:",
+		L"Wait for the display between frames, so that\r\nthe picture never tears.", 0 },
+	{ "display.max_fps", L"FRAME RATE LIMIT:",
+		L"With V-Sync off, the most frames a second.\r\nAuto: twice the display's refresh rate.", 0 },
+	{ "display.interpolation", L"SMOOTH MOTION:",
+		L"Draw a frame for every display refresh, blending\r\nbetween the game's 30 ticks a second.", 0 },
+	{ "display.direct_camera", L"INSTANT AIM:",
+		L"In first person, turn the view the moment the\r\nmouse moves, not up to two ticks later.", 0 },
+	{ "display.show_fps", L"SHOW FRAMES:",
+		L"Draw the frame rate at the bottom right of a game,\r\ncounted over half a second.", 1 },
+	{ "display.high_res_hud", L"HIGH-RES HUD:",
+		L"Draw the HUD from the high-res redraws; off\r\ndraws the game's own pictures.", 1 },
+	{ "display.high_res_text", L"HIGH-RES TEXT:",
+		L"Draw text and titles with high-res fonts; off\r\ndraws the game's own.", 1 },
+	{ "display.widescreen_loading", L"WIDESCREEN LOADING:",
+		L"Widen the original loading screen, keeping its\r\nstock sweep and glow trails.", 1 },
+	{ "display.anti_aliasing", L"ANTI-ALIASING:",
+		L"Smooth jagged edges, which the Xbox did not. FXAA\r\nand SMAA are cheap; SSAA and MSAA are sharper.", 1 },
+	{ "display.anisotropic_filtering", L"TEXTURE FILTERING:",
+		L"Keep floors and walls sharp at a grazing angle,\r\nwhich the Xbox did not. Off: as the Xbox.", 1 },
+	{ "display.shadow_resolution", L"SHADOW RESOLUTION:",
+		L"The size objects' shadows are drawn at: 128 as on\r\nthe Xbox; larger for smoother, as soft, edges.", 1 },
+	{ "display.per_pixel_lighting", L"PER-PIXEL LIGHTING:",
+		L"Light models for each pixel, without the facets\r\nof the Xbox's lighting for each vertex.", 1 },
+	{ "display.model_detail", L"MODEL DETAIL:",
+		L"Stock picks models' detail by the Xbox's 480 lines;\r\nnative by this display's; highest, always the best.", 1 },
+	{ "display.fov", L"FOV:",
+		L"On foot, horizontal at 16:9, in degrees.\r\nDefault keeps the stock view.", 2 },
+	{ "display.viewmodel_fov", L"VIEWMODEL FOV:",
+		L"The weapon and hands, horizontal at 16:9.\r\nDefault keeps the weapon's stock view.", 2 },
+	{ "display.viewmodel_visible", L"VIEWMODELS:",
+		L"Draw first-person weapons, hands and attached\r\nvisuals. Gameplay and sound continue when off.", 2 },
+	{ "display.passenger_third_person", L"PASSENGER THIRD PERSON:",
+		L"Third-person Warthog and Scorpion passengers in\r\nthe campaign and co-op. Weapon zoom is disabled.", 2 },
+	{ "display.viewmodel_shield", L"ARM SHIELDS:",
+		L"The energy shield's flare on your first-person\r\narms too, as on your body.", 2 },
+	{ "display.first_person_legs", L"LEGS:",
+		L"Your legs in first person, seen looking down,\r\nmoving as you run. Your body as others see it.", 2 },
+	{ "display.shield_color", L"SHIELD COLOR:",
+		L"Your shield's flare in an armor color, whatever\r\nyour armor. Only you see it. Default: its own.", 2 },
+	{ "display.overshield_effect", L"OVERSHIELD:",
+		L"The overshield rises up the body and stays lit,\r\nin its own color. Online: the host's choice.", 3 },
+	{ "display.shield_glow", L"SHIELD GLOW:",
+		L"Shields light their surroundings as they flare.\r\nOnline: the host's choice.", 3 },
+	{ "display.shield_glow_intensity", L"GLOW INTENSITY:",
+		L"Light Show: three times as far, at full from a\r\nthird of the flare. Online: the host's choice.", 3 },
+	{ "display.hdr", L"HDR:",
+		L"Let explosions, plasma and the sun shine brighter\r\nthan white, then fit them to the screen.", 3 },
+	{ "display.hdr_output", L"HDR DISPLAY:",
+		L"On an HDR display (Windows HDR on), show that\r\nlight truly brighter. From the next start.", 3 },
+	{ "display.hdr_tone_mapping", L"TONE CURVE:",
+		L"GT7: bright light turns white, as on film. Neutral:\r\nas drawn. ACES: more contrast. Reinhard: softer.", 3 },
+	{ "display.hdr_paper_white", L"PAPER WHITE:",
+		L"With HDR Display, how bright white is, in nits.\r\nAuto: Windows' SDR content brightness.", 3 },
+	{ "display.hdr_peak_brightness", L"PEAK BRIGHTNESS:",
+		L"With HDR Display, your display's brightest, in\r\nnits. Auto: Windows' HDR calibration.", 3 },
+};
+
+/* the entry rows at the end of the main page, each opening the page after it (1 to 3) */
+static wchar_t const *const video_entry_labels[VIDEO_ENTRIES] =
+	{ L"GRAPHICS:", L"FOV AND VIEWMODELS:", L"EXTRA EFFECTS:" };
+static wchar_t const *const video_entry_helps[VIDEO_ENTRIES] =
+{
+	L"The HUD, text, anti-aliasing, shadows and\r\nlighting. Step it left or right to open.",
+	L"The field of view and the first-person weapon.\r\nStep it left or right to open.",
+	L"Visual modifiers the stock game does not have,\r\nsuch as the shield glow. Step it to open."
+};
+static wchar_t const *const video_open_names[2] = { L"OPEN", L"OPEN" };
 
 struct video_choice
 {
@@ -2898,13 +3110,14 @@ struct video_choice
 	char real[VIDEO_MAX][24];
 	short count;
 	short loaded;
+	short value;
 };
 
 static struct video_choice video_choices[VIDEO_CHOICES];
-static char const *const video_keys[VIDEO_CHOICES] =
-{
-	"display.mode", "display.resolution", "display.window_size", "display.vsync", "display.max_fps"
-};
+/* the row the injected rows are copies of, kept: the map's own rows are deleted when the first page is built */
+static struct widget_instance video_template;
+static short video_page;
+static struct widget_instance *video_entries[VIDEO_ENTRIES];
 
 static void video_choice_add(struct video_choice *choice, char const *shown, char const *real)
 {
@@ -2918,6 +3131,38 @@ static void video_choice_add(struct video_choice *choice, char const *shown, cha
 	snprintf(choice->real[choice->count], sizeof(choice->real[0]), "%s", real);
 	choice->pointers[choice->count] = choice->shown[choice->count];
 	choice->count++;
+}
+
+/* "SHOWN:real;SHOWN:real" */
+static void video_choice_list(struct video_choice *choice, char const *list)
+{
+	char shown[32], real[32];
+
+	while (*list)
+	{
+		short at = 0;
+
+		for (; *list && *list != ':' && at < 31; list++)
+			shown[at++] = *list;
+		shown[at] = 0;
+		if (*list == ':')
+			list++;
+		at = 0;
+		for (; *list && *list != ';' && at < 31; list++)
+			real[at++] = *list;
+		real[at] = 0;
+		if (*list == ';')
+			list++;
+		video_choice_add(choice, shown, real);
+	}
+}
+
+static void video_choice_number(struct video_choice *choice, long number)
+{
+	char text[24];
+
+	snprintf(text, sizeof(text), "%ld", number);
+	video_choice_add(choice, text, text);
 }
 
 /* the sizes from the smallest to the largest */
@@ -2943,14 +3188,17 @@ static void video_sizes_sort(long *widths, long *heights, short count)
 
 static void video_choices_read(void)
 {
+	static char const on_off[] = "OFF:false;ON:true";
+	static char const colors[] = "DEFAULT:default;WHITE:white;BLACK:black;RED:red;BLUE:blue;GRAY:gray;"
+		"YELLOW:yellow;GREEN:green;PINK:pink;PURPLE:purple;CYAN:cyan;COBALT:cobalt;ORANGE:orange;TEAL:teal;"
+		"SAGE:sage;BROWN:brown;TAN:tan;MAROON:maroon;SALMON:salmon";
 	long widths[VIDEO_MAX], heights[VIDEO_MAX];
 	char shown[32], real[32];
 	short index, added;
+	long nits;
 
 	memset(video_choices, 0, sizeof(video_choices));
-	video_choice_add(&video_choices[0], "FULLSCREEN", "fullscreen");
-	video_choice_add(&video_choices[0], "BORDERLESS", "borderless");
-	video_choice_add(&video_choices[0], "WINDOWED", "windowed");
+	video_choice_list(&video_choices[V_MODE], "FULLSCREEN:fullscreen;BORDERLESS:borderless;WINDOWED:windowed");
 	added = (short)platform_display_resolutions(widths, heights, VIDEO_MAX - 2);
 	if (added < 0)
 		added = 0;
@@ -2961,9 +3209,9 @@ static void video_choices_read(void)
 	{
 		snprintf(shown, sizeof(shown), "%ld x %ld", widths[index], heights[index]);
 		snprintf(real, sizeof(real), "%ldx%ld", widths[index], heights[index]);
-		video_choice_add(&video_choices[1], shown, real);
+		video_choice_add(&video_choices[V_RESOLUTION], shown, real);
 	}
-	video_choice_add(&video_choices[1], "NATIVE", "native");
+	video_choice_add(&video_choices[V_RESOLUTION], "NATIVE", "native");
 	added = (short)platform_window_sizes(widths, heights, VIDEO_MAX);
 	if (added < 0)
 		added = 0;
@@ -2974,20 +3222,65 @@ static void video_choices_read(void)
 	{
 		snprintf(shown, sizeof(shown), "%ld x %ld", widths[index], heights[index]);
 		snprintf(real, sizeof(real), "%ldx%ld", widths[index], heights[index]);
-		video_choice_add(&video_choices[2], shown, real);
+		video_choice_add(&video_choices[V_WINDOW], shown, real);
 	}
-	if (!video_choices[2].count)
-		video_choice_add(&video_choices[2], "1280 x 960", "1280x960");
-	video_choice_add(&video_choices[3], "OFF", "false");
-	video_choice_add(&video_choices[3], "ON", "true");
-	video_choice_add(&video_choices[4], "AUTO", "0");
-	video_choice_add(&video_choices[4], "30", "30");
-	video_choice_add(&video_choices[4], "60", "60");
-	video_choice_add(&video_choices[4], "120", "120");
-	video_choice_add(&video_choices[4], "144", "144");
-	video_choice_add(&video_choices[4], "165", "165");
-	video_choice_add(&video_choices[4], "240", "240");
-	video_choice_add(&video_choices[4], "NONE", "-1");
+	if (!video_choices[V_WINDOW].count)
+		video_choice_add(&video_choices[V_WINDOW], "1280 x 960", "1280x960");
+	video_choice_list(&video_choices[V_SCALING], "NATIVE:native;75%:75%;50%:50%;25%:25%;ORIGINAL:original");
+	video_choice_list(&video_choices[V_VSYNC], on_off);
+	video_choice_list(&video_choices[V_FPS], "AUTO:0;30:30;60:60;120:120;144:144;165:165;240:240;NONE:-1");
+	video_choice_list(&video_choices[V_SMOOTH], "ON:true;OFF:false");
+	video_choice_list(&video_choices[V_INSTANT], "ON:true;OFF:false");
+	video_choice_list(&video_choices[V_SHOW_FPS], on_off);
+	video_choice_list(&video_choices[V_HUD], on_off);
+	video_choice_list(&video_choices[V_TEXT], on_off);
+	video_choice_list(&video_choices[V_WIDE], on_off);
+	video_choice_list(&video_choices[V_AA],
+		"OFF:off;FXAA:fxaa;SMAA:smaa;SSAA 2X:ssaa2x;MSAA 2X:msaa2x;MSAA 4X:msaa4x;MSAA 8X:msaa8x");
+	video_choice_list(&video_choices[V_TEXFILTER], "OFF:0;2X:2;4X:4;8X:8;16X:16");
+	video_choice_list(&video_choices[V_SHADOW], "128:128;256:256;512:512;1024:1024");
+	video_choice_list(&video_choices[V_PPL], on_off);
+	video_choice_list(&video_choices[V_MODEL], "STOCK:stock;NATIVE:native;HIGHEST:highest");
+	video_choice_add(&video_choices[V_FOV], "DEFAULT", "0");
+	video_choice_add(&video_choices[V_VMFOV], "DEFAULT", "0");
+	for (nits = 80; nits <= 150; nits += 5)
+	{
+		video_choice_number(&video_choices[V_FOV], nits);
+		video_choice_number(&video_choices[V_VMFOV], nits);
+	}
+	video_choice_list(&video_choices[V_VIEWMODELS], on_off);
+	video_choice_list(&video_choices[V_PASSENGER], on_off);
+	video_choice_list(&video_choices[V_ARMSHIELD], on_off);
+	video_choice_list(&video_choices[V_LEGS], on_off);
+	video_choice_list(&video_choices[V_SHIELDCOLOR], colors);
+	video_choice_list(&video_choices[V_OVERSHIELD], on_off);
+	video_choice_list(&video_choices[V_GLOW], on_off);
+	video_choice_list(&video_choices[V_GLOWINT], "DEFAULT:default;LIGHT SHOW:light_show");
+	video_choice_list(&video_choices[V_HDR], on_off);
+	video_choice_list(&video_choices[V_HDRDISPLAY], on_off);
+	video_choice_list(&video_choices[V_TONE], "NEUTRAL:neutral;ACES:aces;REINHARD:reinhard;GT7:gt7");
+	/* (as port_settings.py's PAPER_WHITES and PEAK_BRIGHTNESSES) */
+	video_choice_add(&video_choices[V_PAPER], "AUTO", "0");
+	for (nits = 80; nits <= 400; nits++)
+	{
+		if ((nits < 200 && nits % 10 == 0) || nits == 200 || nits == 203 || nits == 250 ||
+			(nits >= 220 && nits % 20 == 0))
+			video_choice_number(&video_choices[V_PAPER], nits);
+	}
+	video_choice_add(&video_choices[V_PEAK], "AUTO", "0");
+	for (nits = 250; nits < 600; nits += 25)
+		video_choice_number(&video_choices[V_PEAK], nits);
+	for (nits = 600; nits < 1200; nits += 50)
+		video_choice_number(&video_choices[V_PEAK], nits);
+	for (nits = 1200; nits <= 2000; nits += 100)
+		video_choice_number(&video_choices[V_PEAK], nits);
+	video_choice_number(&video_choices[V_PEAK], 2500);
+	video_choice_number(&video_choices[V_PEAK], 3000);
+	video_choice_number(&video_choices[V_PEAK], 4000);
+	video_choice_number(&video_choices[V_PEAK], 5000);
+	video_choice_number(&video_choices[V_PEAK], 6000);
+	video_choice_number(&video_choices[V_PEAK], 8000);
+	video_choice_number(&video_choices[V_PEAK], 10000);
 }
 
 static struct widget_instance *video_list_of(struct widget_instance *widget)
@@ -3000,59 +3293,50 @@ static struct widget_instance *video_list_of(struct widget_instance *widget)
 	return !strcmp(top->name, "video_settings_screen") ? named(top, "video_options_menu", 0) : NULL;
 }
 
-static void video_inject(struct widget_instance *list)
+/* how many choices a page has, and the place of a choice among them */
+static short video_page_count(short page)
 {
-	struct widget_instance *source = named(list, "op_specular", 0);
-	struct widget_instance *bar = named(list, "video_button_bar", 0);
-	struct widget_instance *last_old;
-	struct widget_instance *row;
-	struct widget_instance *next;
+	short choice, count = 0;
 
-	if (!named(list, "op_resolution", 0) || !source || !bar || !bar->previous)
-		return;
-	last_old = bar->previous;
-	video_choices_read();
-	ui_widget_port_inject_row(source, bar, 73, L"DISPLAY MODE:",
-		L"Fullscreen takes the display; borderless covers\r\nit with a window. F11 switches to the window.",
-		video_choices[0].pointers, video_choices[0].count);
-	ui_widget_port_inject_row(source, bar, 99, L"RESOLUTION:",
-		L"What fullscreen and borderless draw at. Native\r\nis the display's own.",
-		video_choices[1].pointers, video_choices[1].count);
-	ui_widget_port_inject_row(source, bar, 125, L"WINDOW SIZE:",
-		L"The size of the window, for the windowed mode.",
-		video_choices[2].pointers, video_choices[2].count);
-	ui_widget_port_inject_row(source, bar, 151, L"V-SYNC:",
-		L"Wait for the display between frames, so that\r\nthe picture never tears.",
-		video_choices[3].pointers, video_choices[3].count);
-	ui_widget_port_inject_row(source, bar, 177, L"FRAME RATE LIMIT:",
-		L"With V-Sync off, the most frames a second.\r\nAuto: twice the display's refresh rate.",
-		video_choices[4].pointers, video_choices[4].count);
-	/* the map's own rows go (the list's focus is on the first of them: it moves to the first new row,
-	as deleting a widget leaves the focus pointing at it) */
-	for (row = list->child; row; row = next)
+	for (choice = 0; choice < VIDEO_CHOICES; choice++)
 	{
-		next = row->next;
-		ui_widget_delete(row);
-		if (row == last_old)
-			break;
+		if (video_rows[choice].page == page)
+			count++;
 	}
-	list->focused_child = list->child;
-	list->parameters.list.selected_index = 0;
+	return count;
 }
 
-static void video_show(struct widget_instance *list, boolean defaults)
+static short video_nth(short choice)
+{
+	short index, nth = 0;
+
+	for (index = 0; index < choice; index++)
+	{
+		if (video_rows[index].page == video_rows[choice].page)
+			nth++;
+	}
+	return nth;
+}
+
+/* the spinner of a choice on the page shown, else NULL */
+static struct widget_instance *video_choice_spinner(struct widget_instance *list, short choice)
+{
+	if (video_rows[choice].page != video_page)
+		return NULL;
+	return row_spinner(named(list, "op_specular", video_nth(choice)));
+}
+
+/* the values the settings have (or, with defaults, their defaults) */
+static void video_values_read(boolean defaults)
 {
 	short choice, index;
 
 	for (choice = 0; choice < VIDEO_CHOICES; choice++)
 	{
-		struct widget_instance *spinner = row_spinner(named(list, "op_specular", choice));
 		char text[128];
 		short found = 0;
 
-		if (!spinner)
-			continue;
-		if (setting_text(video_keys[choice], text, sizeof(text), defaults))
+		if (setting_text(video_rows[choice].key, text, sizeof(text), defaults))
 		{
 			for (index = 0; index < video_choices[choice].count; index++)
 			{
@@ -3060,29 +3344,174 @@ static void video_show(struct widget_instance *list, boolean defaults)
 					found = index;
 			}
 		}
-		spinner->parameters.list.selected_index = found;
+		video_choices[choice].value = found;
 		if (!defaults)
 			video_choices[choice].loaded = found;
 	}
 }
 
-static void video_save(struct widget_instance *list)
+/* the spinners of the page shown set to the values held */
+static void video_apply(struct widget_instance *list)
+{
+	short choice;
+
+	for (choice = 0; choice < VIDEO_CHOICES; choice++)
+	{
+		struct widget_instance *spinner = video_choice_spinner(list, choice);
+
+		if (spinner)
+			spinner->parameters.list.selected_index = video_choices[choice].value;
+	}
+}
+
+/* the values the spinners of the page shown have, held (before the page changes, or OK) */
+static void video_capture(struct widget_instance *list)
+{
+	short choice;
+
+	for (choice = 0; choice < VIDEO_CHOICES; choice++)
+	{
+		struct widget_instance *spinner = video_choice_spinner(list, choice);
+
+		if (spinner && video_choices[choice].count)
+			video_choices[choice].value = (short)PIN(spinner->parameters.list.selected_index, 0,
+				video_choices[choice].count - 1);
+	}
+}
+
+/* the rows of a page made (those there deleted), the focus on its row `focus` */
+static void video_build(struct widget_instance *list, short page, short focus)
+{
+	struct widget_instance *bar = named(list, "video_button_bar", 0);
+	struct widget_instance *row;
+	short choice, nth = 0, index;
+
+	if (!bar || !video_template.parent)
+		return;
+	while ((row = named(list, "op_specular", 0)) != NULL)
+		ui_widget_delete(row);
+	memset(video_entries, 0, sizeof(video_entries));
+	video_page = page;
+	for (choice = 0; choice < VIDEO_CHOICES; choice++)
+	{
+		if (video_rows[choice].page != page)
+			continue;
+		ui_widget_port_inject_row(&video_template, bar, (short)(73 + VIDEO_ROW_PITCH * nth),
+			video_rows[choice].label, video_rows[choice].help, video_choices[choice].pointers,
+			video_choices[choice].count);
+		nth++;
+	}
+	if (page == 0)
+	{
+		for (index = 0; index < VIDEO_ENTRIES; index++)
+		{
+			ui_widget_port_inject_row(&video_template, bar, (short)(73 + VIDEO_ROW_PITCH * nth),
+				video_entry_labels[index], video_entry_helps[index], video_open_names, 2);
+			video_entries[index] = row_spinner(named(list, "op_specular", nth));
+			nth++;
+		}
+	}
+	/* (deleting a widget leaves the focus pointing at it) */
+	row = list->child;
+	for (index = 0; row && row->next && index < focus; index++)
+		row = row->next;
+	list->focused_child = row;
+	list->parameters.list.selected_index = index;
+	video_apply(list);
+}
+
+/* each frame (the description's update): an entry row stepped opens its page */
+static void video_pages_update(struct widget_instance *list)
+{
+	short index;
+
+	if (video_page != 0)
+		return;
+	for (index = 0; index < VIDEO_ENTRIES; index++)
+	{
+		if (!video_entries[index])
+			continue;
+		video_entries[index]->visible = FALSE;
+		if (video_entries[index]->parameters.list.selected_index != 0)
+		{
+			ui_play_audio_feedback_sound(SOUND_FORWARD);
+			video_capture(list);
+			video_build(list, (short)(index + 1), 0);
+			return;
+		}
+	}
+}
+
+/* A on an entry row's (hidden) spinner: steps it, which opens the page (ui_widget.c's A handling calls this
+by way of pc_menu_network_open). FALSE for any other widget. */
+boolean pc_menu_video_open(struct widget_instance *widget)
+{
+	short index;
+
+	if (!widget || !widget->name || video_page != 0 || !video_entries[0] || !video_list_of(widget))
+		return FALSE;
+	for (index = 0; index < VIDEO_ENTRIES; index++)
+	{
+		if (video_entries[index] == widget)
+		{
+			widget->parameters.list.selected_index = 1;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* back (the button, and B): from a submenu to the main page; FALSE on the main page, which the screen then
+leaves as usual (called from pc_menu_network_back, which both back paths already call) */
+boolean pc_menu_video_back(struct widget_instance *widget)
+{
+	struct widget_instance *list;
+	short from = video_page;
+
+	if (!widget || !widget->name || video_page == 0 || strcmp(screen_of(widget)->name, "video_settings_screen"))
+		return FALSE;
+	list = video_list_of(widget);
+	if (!list)
+		return FALSE;
+	video_capture(list);
+	video_build(list, 0, (short)(video_page_count(0) + from - 1));
+	return TRUE;
+}
+
+static void video_inject(struct widget_instance *list)
+{
+	struct widget_instance *source = named(list, "op_specular", 0);
+	struct widget_instance *bar = named(list, "video_button_bar", 0);
+	struct widget_instance *row;
+	struct widget_instance *next;
+
+	if (!named(list, "op_resolution", 0) || !source || !bar)
+		return;
+	video_template = *source;
+	video_choices_read();
+	video_values_read(FALSE);
+	/* the map's own rows go */
+	for (row = list->child; row && row != bar; row = next)
+	{
+		next = row->next;
+		ui_widget_delete(row);
+	}
+	video_build(list, 0, 0);
+}
+
+static void video_save(void)
 {
 	short choice;
 	boolean changed = FALSE;
 
 	for (choice = 0; choice < VIDEO_CHOICES; choice++)
 	{
-		struct widget_instance *spinner = row_spinner(named(list, "op_specular", choice));
-		short index;
+		short index = video_choices[choice].value;
 
-		if (!spinner)
-			continue;
-		index = spinner->parameters.list.selected_index;
 		if (index < 0 || index >= video_choices[choice].count || index == video_choices[choice].loaded)
 			continue;
 		video_choices[choice].loaded = index;
-		setting_write(video_keys[choice], video_choices[choice].real[index]);
+		setting_write(video_rows[choice].key, video_choices[choice].real[index]);
 		changed = TRUE;
 	}
 	if (changed)
@@ -3098,18 +3527,33 @@ short pc_menu_video_function(struct widget_instance *widget, word function, bool
 		return NONE;
 	if (function == 114)
 	{
+		video_page = 0;
+		memset(video_entries, 0, sizeof(video_entries));
 		video_inject(list);
-		video_show(list, FALSE);
 	}
 	else if (function == 125)
 	{
 		/* (saved, then back, as the audio screen's OK does: its own opens another widget) */
-		video_save(list);
+		video_capture(list);
+		video_save();
+		if (video_page != 0)
+		{
+			/* port: a submenu's OK saves and returns to the main page. widget_deleted stops the OK
+			handler opening its own widget, as it is stopped when the screen is left. */
+			short from = video_page;
+
+			video_build(list, 0, (short)(video_page_count(0) + from - 1));
+			*widget_deleted = TRUE;
+			return TRUE;
+		}
 		ui_widget_port_go_back(widget);
 		*widget_deleted = TRUE;
 	}
 	else if (function == 135)
-		video_show(list, TRUE);
+	{
+		video_values_read(TRUE);
+		video_apply(list);
+	}
 	else
 		return NONE;
 	return TRUE;
@@ -3316,6 +3760,9 @@ boolean pc_menu_network_back(struct widget_instance *widget)
 {
 	struct widget_instance *list;
 
+	/* port: the video and audio screens' submenus go back to their main pages */
+	if (pc_menu_video_back(widget) || pc_menu_audio_back(widget))
+		return TRUE;
 	if (!widget || !widget->name || net_page == 0 || strcmp(screen_of(widget)->name, "network_settings_screen"))
 		return FALSE;
 	list = net_list_of(widget);
@@ -3351,6 +3798,13 @@ short pc_menu_network_function(struct widget_instance *widget, word function)
 				setting_write(net_rows[row].key, net_rows[row].real[net_rows[row].value]);
 			}
 		}
+		/* port: the streamer mode page's OK returns to the main page (failing skips the OK handler's own
+		go back, as audio's does: "event handler function 167 failed" in the log is harmless) */
+		if (net_page != 0)
+		{
+			net_build(list, 0, NET_ENTRY);
+			return FALSE;
+		}
 	}
 	else if (function == 187)
 	{
@@ -3369,6 +3823,9 @@ boolean pc_menu_network_open(struct widget_instance *widget)
 	struct widget_instance *list;
 	struct widget_instance *entry;
 
+	/* port: the video and audio screens' entry rows */
+	if (pc_menu_video_open(widget) || pc_menu_audio_open(widget))
+		return TRUE;
 	if (!widget || !widget->name || net_page != 0)
 		return FALSE;
 	list = net_list_of(widget);
@@ -3394,6 +3851,7 @@ void pc_menu_network_description(struct widget_instance *list)
 
 	if (entry && entry->parameters.list.selected_index != 0)
 	{
+		ui_play_audio_feedback_sound(SOUND_FORWARD);
 		net_capture(list);
 		net_build(list, 1, 0);
 	}
@@ -3405,9 +3863,16 @@ void pc_menu_network_description(struct widget_instance *list)
 void pc_menu_video_description(struct widget_instance *list)
 {
 	extern short ui_widget_port_row_description(struct widget_instance *row);
+	extern void ui_widget_port_description_clear(struct widget_instance *list);
 	struct widget_instance *description = list->parameters.list.extended_description;
 	short index;
 
+	/* port: the video screen's pages, and its description below the rows */
+	if (!strcmp(list->name, "video_options_menu"))
+	{
+		video_pages_update(list);
+		ui_widget_port_description_clear(list);
+	}
 	if (!description || description->type != 1 || !list->focused_child)
 		return;
 	index = ui_widget_port_row_description(list->focused_child);
@@ -3420,9 +3885,12 @@ void pc_menu_audio_description(struct widget_instance *list)
 {
 	extern short ui_widget_port_row_description(struct widget_instance *row);
 	struct widget_instance *description = list->parameters.list.extended_description;
-	struct widget_instance *row = list->focused_child;
+	struct widget_instance *row;
 	short index;
 
+	/* port: Sound Processing opens from here; the focus is read after, as the rows may have been rebuilt */
+	audio_pages_update(list);
+	row = list->focused_child;
 	{
 		extern void ui_widget_port_description_clear(struct widget_instance *list);
 
@@ -4005,8 +4473,10 @@ static boolean controls_back(struct widget_instance *widget, boolean *widget_del
 	{
 		controls_screen.capturing_control = NONE;
 		platform_binding_capture_cancel();
+		ui_play_audio_feedback_sound(SOUND_BACK);
 		return TRUE;
 	}
+	ui_play_audio_feedback_sound(SOUND_BACK);
 	ui_widget_port_go_back(widget);
 	*widget_deleted = TRUE;
 	return TRUE;
@@ -5331,6 +5801,70 @@ static void gametype_bank_read(short bank)
 	multiplayer.gametype_chosen = 0;
 }
 
+#define GAME_VARIANT_DESCRIPTIONS "ui\\shell\\strings\\game_variant_descriptions"
+/* the Xbox's built-in gametypes (playlist_profile.c), whose descriptions follow the ten generic ones */
+#define NUMBER_OF_XBOX_GAMETYPES 26
+#define GAMETYPE_DESCRIPTION_LENGTH 192
+
+/* the gametype picture's frames, as the Xbox's own code has them (ui_widget_game_data_input_functions.c's
+multiplayer_game_bitmap_frame): not the game engines' order */
+enum
+{
+	GAMETYPE_FRAME_CTF,
+	GAMETYPE_FRAME_KING,
+	GAMETYPE_FRAME_SLAYER,
+	GAMETYPE_FRAME_ODDBALL,
+	GAMETYPE_FRAME_RACE,
+	GAMETYPE_FRAME_UNKNOWN
+};
+
+static short gametype_picture_frame(long engine)
+{
+	switch (engine)
+	{
+	case game_engine_ctf: return GAMETYPE_FRAME_CTF;
+	case game_engine_king: return GAMETYPE_FRAME_KING;
+	case game_engine_slayer: return GAMETYPE_FRAME_SLAYER;
+	case game_engine_oddball: return GAMETYPE_FRAME_ODDBALL;
+	case game_engine_race: return GAMETYPE_FRAME_RACE;
+	}
+	return GAMETYPE_FRAME_UNKNOWN;
+}
+
+/* the gametype's description from the tag: a built-in one's own, else its game engine's and teams' */
+static boolean gametype_description_text(struct game_variant const *variant, wchar_t *text, short size)
+{
+	long tag_index = tag_loaded('ustr', GAME_VARIANT_DESCRIPTIONS);
+	wchar_t const *string;
+	long string_index;
+
+	if (tag_index == NONE)
+		return FALSE;
+	if ((variant->flags & 1) && (variant->flags >> 8) < NUMBER_OF_XBOX_GAMETYPES)
+	{
+		string_index = 10 + (variant->flags >> 8);
+	}
+	else
+	{
+		switch (variant->game_engine_index)
+		{
+		case game_engine_ctf: string_index = 0; break;
+		case game_engine_slayer: string_index = 2; break;
+		case game_engine_oddball: string_index = 4; break;
+		case game_engine_king: string_index = 6; break;
+		case game_engine_race: string_index = 8; break;
+		default: return FALSE;
+		}
+		string_index += variant->universal_variant.teams ? 1 : 0;
+	}
+	string = unicode_string_list_get_string(tag_index, (short)string_index);
+	if (!string || string == (wchar_t const *)-1)
+		return FALSE;
+	ustrncpy(text, string, size - 1);
+	text[size - 1] = 0;
+	return TRUE;
+}
+
 /* a gametype's kind and rules, for the description beside a list: its game
 engine's name (or its OpenCE gametype's), teams, and what wins */
 static void gametype_rules_text(long profile_index, wchar_t *text, short size)
@@ -5345,6 +5879,9 @@ static void gametype_rules_text(long profile_index, wchar_t *text, short size)
 		return;
 	if (!playlist_profile_get_options(profile_index, &options))
 		game_variant_options_default(&variant, &options);
+	/* port: the tag's description (OpenCE's gametypes have none: theirs follows) */
+	if (!game_modes_variant_is_opence(&variant, &options) && gametype_description_text(&variant, text, size))
+		return;
 	engine = PIN(variant.game_engine_index, 0, 5);
 	kind = game_modes_variant_kind_name(&variant, &options);
 	switch (game_modes_variant_mode(&variant, &options))
@@ -5366,6 +5903,54 @@ static void gametype_rules_text(long profile_index, wchar_t *text, short size)
 	text[size - 1] = 0;
 }
 
+/* port: whether the gametype list has more gametypes than rows, in which case its first and last rows
+are scroll rows (like the map list's) and only the rows between them hold gametypes. Only the list with
+the bank chooser (the menus' own) does this. */
+static boolean gametype_list_scrolls(struct widget_instance *list)
+{
+	return multiplayer.bank_count > GAMETYPE_ROWS && named(list, "list_item_0_chooser_spinner", 0) != NULL;
+}
+
+/* ui_widget.c: whether the row is one of the gametype list's scroll rows right now */
+boolean pc_menu_gametype_scroll_row(struct widget_instance *row)
+{
+	/* port: by place, not name: the second row's definition is named list_item_0 */
+	return row && row->parent && gametype_list_scrolls(row->parent) &&
+		(sibling_index(row) == 1 || sibling_index(row) == GAMETYPE_ROWS);
+}
+
+
+/* -1: the focus is on the up row, 1: on the down row, 0: neither */
+static short gametype_scroll_focused(struct widget_instance *list)
+{
+	short row = focused_row(list);
+
+	if (!gametype_list_scrolls(list) || row == NONE)
+		return 0;
+	return row == 1 ? -1 : row == GAMETYPE_ROWS ? 1 : 0;
+}
+
+static void gametype_page(short direction)
+{
+	short count = (short)(GAMETYPE_ROWS - 2);
+	short first = (short)PIN(multiplayer.gametype_first + direction * count, 0,
+		MAX(0, multiplayer.bank_count - count));
+
+	if (first != multiplayer.gametype_first)
+	{
+		multiplayer.gametype_first = first;
+		ui_play_audio_feedback_sound(SOUND_CURSOR);
+	}
+}
+
+/* ui_widget.c: a click on a scroll row: the up row pages back, the down row pages on */
+void pc_menu_gametype_scroll_click(struct widget_instance *row)
+{
+	if (!pc_menu_gametype_scroll_row(row))
+		return;
+	gametype_page((short)(sibling_index(row) == 1 ? -1 : 1));
+}
+
 /* "mp profiles list initialize": on the gametype used last */
 static boolean gametype_list_initialize(struct widget_instance *list)
 {
@@ -5379,11 +5964,17 @@ static boolean gametype_list_initialize(struct widget_instance *list)
 		if (multiplayer.bank[index] == last)
 			multiplayer.gametype_chosen = index;
 	}
-	multiplayer.gametype_first = (short)PIN(multiplayer.gametype_chosen - GAMETYPE_ROWS / 2, 0,
-		MAX(0, multiplayer.bank_count - GAMETYPE_ROWS));
-	if (spinner)
-		spinner->parameters.list.selected_index = multiplayer.bank_shown;
-	focus_row(list, (short)(1 + multiplayer.gametype_chosen - multiplayer.gametype_first));
+	{
+		/* port: with scroll rows, 8 gametypes a page, from the second row */
+		boolean scrolls = gametype_list_scrolls(list);
+		short count = scrolls ? (short)(GAMETYPE_ROWS - 2) : GAMETYPE_ROWS;
+
+		multiplayer.gametype_first = (short)PIN(multiplayer.gametype_chosen - count / 2, 0,
+			MAX(0, multiplayer.bank_count - count));
+		if (spinner)
+			spinner->parameters.list.selected_index = multiplayer.bank_shown;
+		focus_row(list, (short)((scrolls ? 2 : 1) + multiplayer.gametype_chosen - multiplayer.gametype_first));
+	}
 	return TRUE;
 }
 
@@ -5416,26 +6007,58 @@ static void gametype_list_update(struct widget_instance *list)
 	struct widget_instance *spinner = named(list, "list_item_0_chooser_spinner", 0);
 	struct widget_instance *row;
 	struct widget_instance *widget;
-	short row_index = 0, focused = NONE, count;
+	short row_index = 0, focused = NONE, scroll_focus = 0, count, lead;
+	boolean scrolls;
 
 	if (spinner && spinner->parameters.list.selected_index != multiplayer.bank_shown)
 		gametype_bank_read((short)PIN(spinner->parameters.list.selected_index, 0, NUMBER_OF_GAMETYPE_BANKS - 1));
-	count = (short)MIN(multiplayer.bank_count, GAMETYPE_ROWS);
-	/* (the rows after the spinner's: scrolled as list_scroll does) */
+	/* port: too many gametypes for the rows: the first and last rows scroll, the 8 between hold gametypes */
+	scrolls = gametype_list_scrolls(list);
+	lead = scrolls ? 1 : 0;
+	count = scrolls ? (short)(GAMETYPE_ROWS - 2) : (short)MIN(multiplayer.bank_count, GAMETYPE_ROWS);
+	multiplayer.gametype_first = (short)PIN(multiplayer.gametype_first, 0, MAX(0, multiplayer.bank_count - count));
 	for (row = list->child; row; row = row->next, row_index++)
 	{
-		if (row == list->focused_child && row_index >= 1 && row_index <= GAMETYPE_ROWS)
-			focused = (short)(row_index - 1);
+		if (row != list->focused_child || row_index < 1 || row_index > GAMETYPE_ROWS)
+			continue;
+		if (scrolls && row_index == 1)
+			scroll_focus = -1;
+		else if (scrolls && row_index == GAMETYPE_ROWS)
+			scroll_focus = 1;
+		else if (row_index - 1 - lead < count)
+			focused = (short)(row_index - 1 - lead);
 	}
-	if (focused == count - 1 && multiplayer.gametype_first + count < multiplayer.bank_count && list_scrolls_at_end())
+	if (scrolls)
+	{
+		/* (the d-pad onto a scroll row pages by one and goes back onto the gametype row; the pointer's
+		click pages in gametype_choose) */
+		if (scroll_focus > 0 && multiplayer.gametype_first + count < multiplayer.bank_count && list_scrolls_at_end())
+		{
+			multiplayer.gametype_first++;
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
+			focus_row(list, (short)(lead + count));
+			focused = (short)(count - 1);
+		}
+		else if (scroll_focus < 0 && multiplayer.gametype_first > 0 && list_scrolls_at_end())
+		{
+			multiplayer.gametype_first--;
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
+			focus_row(list, (short)(1 + lead));
+			focused = 0;
+		}
+	}
+	else if (focused == count - 1 && multiplayer.gametype_first + count < multiplayer.bank_count &&
+		list_scrolls_at_end())
 	{
 		multiplayer.gametype_first++;
+		ui_play_audio_feedback_sound(SOUND_CURSOR);
 		focus_row(list, (short)focused);
 		focused--;
 	}
 	else if (focused == 0 && multiplayer.gametype_first > 0 && list_scrolls_at_end())
 	{
 		multiplayer.gametype_first--;
+		ui_play_audio_feedback_sound(SOUND_CURSOR);
 		focus_row(list, 2);
 		focused++;
 	}
@@ -5444,25 +6067,34 @@ static void gametype_list_update(struct widget_instance *list)
 	for (row = list->child, row_index = 0; row; row = row->next, row_index++)
 	{
 		wchar_t text[ROW_TEXT_LENGTH];
+		short slot = (short)(row_index - 1 - lead);
+		boolean is_scroll = scrolls && (row_index == 1 || row_index == GAMETYPE_ROWS);
 
 		if (row_index < 1 || row_index > GAMETYPE_ROWS)
 			continue;
-		row->visible = row_index - 1 < count;
-		gametype_name((short)(multiplayer.gametype_first + row_index - 1), text);
-		text_set(named(row, "list_item_text", 0), text);
+		row->visible = is_scroll || (slot >= 0 && slot < count);
+		/* (every row at the same left: the last was 5 units left of the others) */
+		row->horizontal_offset = 20;
+		gametype_name((short)(multiplayer.gametype_first + slot), text);
+		text_set(named(row, "list_item_text", 0), is_scroll ? L"" : text);
+		visible_set(named(row, "list_item_text", 0), !is_scroll);
+		if (row->animation.number_of_sprite_frames == 2 || row->animation.number_of_sprite_frames == 3)
+		{
+			row->animation.current_frame_index =
+				(!is_scroll && (short)(multiplayer.gametype_first + slot) == multiplayer.gametype_chosen) ? 1 : 0;
+		}
 		if (named(row, "list_item_arrows", 0))
-			named(row, "list_item_arrows", 0)->visible = row == list->focused_child;
-		if (named(row, "scroll_up_button", 0))
-			named(row, "scroll_up_button", 0)->visible = FALSE;
-		if (named(row, "scroll_down_button", 0))
-			named(row, "scroll_down_button", 0)->visible = FALSE;
+			named(row, "list_item_arrows", 0)->visible = row == list->focused_child && !is_scroll;
+		scroll_button_set(row, "scroll_up_button", is_scroll && row_index == 1, multiplayer.gametype_first > 0);
+		scroll_button_set(row, "scroll_down_button", is_scroll && row_index == GAMETYPE_ROWS,
+			multiplayer.gametype_first + count < multiplayer.bank_count);
 	}
 	visible_set(named(description, "locked_gametype_icon", 0), FALSE);
 	visible_set(named(description, "gametype_right_item", 0), multiplayer.bank_count > 0);
 	if (multiplayer.gametype_chosen < multiplayer.bank_count)
 	{
 		struct game_variant variant;
-		wchar_t text[ROW_TEXT_LENGTH * 2];
+		wchar_t text[GAMETYPE_DESCRIPTION_LENGTH];
 
 		gametype_name(multiplayer.gametype_chosen, text);
 		text_set(named(description, "gametype_right_name", 0), text);
@@ -5471,10 +6103,10 @@ static void gametype_list_update(struct widget_instance *list)
 			long engine = PIN(variant.game_engine_index, 0, 5);
 
 			if ((widget = named(description, "gametype_right_pic", 0)) != NULL)
-				widget->animation.current_frame_index = (short)engine;
+				widget->animation.current_frame_index = gametype_picture_frame(engine);
 			gametype_rules_text(multiplayer.gametypes[multiplayer.bank[multiplayer.gametype_chosen]], text,
 				NUMBEROF(text));
-			text_set(named(description, "gametype_right_data", 0), text);
+			text_set_length(named(description, "gametype_right_data", 0), text, GAMETYPE_DESCRIPTION_LENGTH);
 		}
 	}
 	profile_name_show(description);
@@ -5483,7 +6115,16 @@ static void gametype_list_update(struct widget_instance *list)
 /* "mp profile set for game" */
 static boolean gametype_choose(struct widget_instance *list)
 {
+	short scroll;
+
 	gametype_list_update(list);
+	/* port: A or a click on a scroll row pages the list; nothing is chosen (FALSE: the screen stays) */
+	scroll = gametype_scroll_focused(list);
+	if (scroll)
+	{
+		gametype_page(scroll);
+		return FALSE;
+	}
 	gametype_setup_end();
 	if (multiplayer.gametype_chosen >= multiplayer.bank_count)
 		return campaign_fail();
@@ -9941,7 +10582,7 @@ static void gametype_edit_list_update(struct widget_instance *list)
 	{
 		long profile_index = gametype_edit.gametypes[gametype_edit.chosen];
 		struct game_variant variant;
-		wchar_t text[ROW_TEXT_LENGTH * 2];
+		wchar_t text[GAMETYPE_DESCRIPTION_LENGTH];
 
 		visible_set(named(description, "locked_gametype_icon", 0),
 			((unsigned long)profile_index & PLAYLIST_READ_ONLY_BIT) != 0);
@@ -9952,9 +10593,9 @@ static void gametype_edit_list_update(struct widget_instance *list)
 			long engine = PIN(variant.game_engine_index, 0, 5);
 
 			if ((widget = named(description, "gametype_right_pic", 0)) != NULL)
-				widget->animation.current_frame_index = (short)engine;
+				gametype_picture_frame(engine);
 			gametype_rules_text(profile_index, text, NUMBEROF(text));
-			text_set(named(description, "gametype_right_data", 0), text);
+			text_set_length(named(description, "gametype_right_data", 0), text, GAMETYPE_DESCRIPTION_LENGTH);
 		}
 	}
 	profile_name_show(description);
@@ -10946,6 +11587,7 @@ static boolean gp_activate(struct widget_instance *widget)
 		return TRUE;
 	if (code > GP_CATEGORY && code < GP_PLAYER)
 	{
+		ui_play_audio_feedback_sound(SOUND_FORWARD);
 		gp.pending = (short)(code - GP_CATEGORY);
 		gp.focus_col = NONE;
 	}
@@ -11044,7 +11686,21 @@ short pc_menu_gamepad_function(struct widget_instance *widget, word function)
 		controller_remap_capture_end();
 	}
 	else if (function == 131)
-		return gp_save(widget);
+	{
+		boolean saved = gp_save(widget);
+
+		/* port: a submenu's OK saves and returns to the main page. Failing the function skips the OK
+		handler's own go back, as the audio screen's does (the log says "event handler function 131 failed":
+		harmless). The back sound still plays, from the sound table in ui_widget_event_handler_functions.c. */
+		if (saved && gp.page != 0)
+		{
+			gp.pending = 0;
+			gp.focus_col = 1;
+			gp.focus_row = (short)(2 + gp.page - 1);
+			return FALSE;
+		}
+		return saved;
+	}
 	else if (function == 132)
 	{
 		if (gp.active)
@@ -11695,8 +12351,8 @@ void pc_menu_map_list_update(struct widget_instance *widget)
 
 		if (row_top)
 		{
-			visible_set(named(row_top, "scroll_up_button", 0), map_list.first > 0);
-			visible_set(named(row_top, "scroll_down_button", 0), FALSE);
+			scroll_button_set(row_top, "scroll_up_button", TRUE, map_list.first > 0);
+			scroll_button_set(row_top, "scroll_down_button", FALSE, FALSE);
 		}
 		if (row_end)
 		{
@@ -11704,8 +12360,8 @@ void pc_menu_map_list_update(struct widget_instance *widget)
 			row_end->visible = TRUE;
 			visible_set(named(row_end, "list_item_text", 0), FALSE);
 			visible_set(named(row_end, "list_item_arrows", 0), FALSE);
-			visible_set(named(row_end, "scroll_up_button", 0), FALSE);
-			visible_set(named(row_end, "scroll_down_button", 0), map_list.first + 9 < total);
+			scroll_button_set(row_end, "scroll_up_button", FALSE, FALSE);
+			scroll_button_set(row_end, "scroll_down_button", TRUE, map_list.first + 9 < total);
 		}
 	}
 	hide_row_arrows(widget);
@@ -11751,10 +12407,16 @@ void pc_menu_map_row_click(struct widget_instance *row)
 	short total;
 
 	if (!strcmp(row->name, "list_item_0"))
+	{
+		if (map_list.first > 0)
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
 		map_list.first = (short)MAX(0, map_list.first - 9);
+	}
 	else if (!strcmp(row->name, "list_item_10"))
 	{
 		total = ui_widget_port_multiplayer_maps(&names, &last_used);
+		if (map_list.first + 9 < total)
+			ui_play_audio_feedback_sound(SOUND_CURSOR);
 		map_list.first = (short)MIN(MAX(0, total - 9), map_list.first + 9);
 	}
 }
